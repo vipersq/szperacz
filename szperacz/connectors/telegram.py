@@ -104,7 +104,7 @@ class TelegramConnector(Connector):
         # automatycznie do 5 min zamiast przerywać synchronizację.
         return TelegramClient(str(self.session_path), self.api_id, self.api_hash,
                               flood_sleep_threshold=300,
-                              device_model="Szperacz", app_version="0.1")
+                              device_model="Szperacz", app_version="1.0")
 
     async def login(self, phone_cb=None, code_cb=None, password_cb=None, log=None) -> str:
         """Logowanie krok po kroku, z informacją, GDZIE Telegram wysłał kod.
