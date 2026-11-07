@@ -20,6 +20,8 @@ from . import service
 from .index import Index, _clean_term, fold, make_snippet
 from . import browser
 from .browser import telegram_app_link
+from . import shield
+from .localai import RECOMMENDED_VISION, LocalAI
 from .models import MEDIA_LABELS, Hit, Query
 
 # ------------------------------------------------------------------ kolory
@@ -452,6 +454,50 @@ class SettingsDialog(Dialog):
                   style="Muted.TLabel").grid(row=r, column=0, columnspan=2, sticky="w", pady=(4, 12))
         r += 1
 
+        la, st = cfg.local_ai, (app.lai_status or {})
+        ttk.Label(b, text="LOKALNE AI (Ollama / LM Studio)", style="Section.TLabel").grid(row=r, column=0, sticky="w", pady=(4, 4))
+        info = (f"wykryto: {st.get('backend')}, {len(st.get('models') or [])} modeli" if st.get("backend")
+                else (st.get("error") or "sprawdzam…"))
+        ttk.Label(b, text=info, style="Muted.TLabel").grid(row=r, column=1, sticky="e")
+        r += 1
+        self.la_enabled = tk.BooleanVar(value=la.enabled)
+        self.la_translate = tk.BooleanVar(value=la.auto_translate)
+        self.la_images = tk.BooleanVar(value=la.check_images)
+        self.la_shield = tk.BooleanVar(value=cfg.filters.shield)
+        self.la_hidden = tk.StringVar(value=la.hidden_mode)
+        self.v["la_url"] = tk.StringVar(value=la.ollama_url)
+        self.v["la_text"] = tk.StringVar(value=la.text_model)
+        self.v["la_vision"] = tk.StringVar(value=la.vision_model)
+        models = ["auto"] + list(st.get("models") or [])
+        ttk.Checkbutton(b, text="Włącz lokalne AI (ocena wyników, tłumaczenie, sprawdzanie zdjęć)",
+                        variable=self.la_enabled).grid(row=r, column=0, columnspan=2, sticky="w", pady=3)
+        r += 1
+        ttk.Label(b, text="Adres Ollamy").grid(row=r, column=0, sticky="w", pady=3)
+        ttk.Entry(b, textvariable=self.v["la_url"], width=44).grid(row=r, column=1, sticky="we", pady=3)
+        r += 1
+        ttk.Label(b, text=f"Model tekstu (auto: {st.get('text') or '—'})").grid(row=r, column=0, sticky="w", pady=3)
+        ttk.Combobox(b, textvariable=self.v["la_text"], values=models, width=42).grid(row=r, column=1, sticky="we", pady=3)
+        r += 1
+        ttk.Label(b, text=f"Model obrazu (auto: {st.get('vision') or '—'})").grid(row=r, column=0, sticky="w", pady=3)
+        vrow = ttk.Frame(b)
+        vrow.grid(row=r, column=1, sticky="we", pady=3)
+        ttk.Combobox(vrow, textvariable=self.v["la_vision"], values=models, width=26).pack(side="left", fill="x", expand=True)
+        ttk.Button(vrow, text=f"Pobierz {RECOMMENDED_VISION}",
+                   command=lambda: (self.destroy(), app.pull_model(RECOMMENDED_VISION))).pack(side="left", padx=(6, 0))
+        r += 1
+        opt = ttk.Frame(b)
+        opt.grid(row=r, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ttk.Checkbutton(opt, text="Tłumacz automatycznie na polski", variable=self.la_translate).pack(side="left", padx=(0, 14))
+        ttk.Checkbutton(opt, text="Sprawdzaj zdjęcia z publicznych kanałów", variable=self.la_images).pack(side="left", padx=(0, 14))
+        ttk.Checkbutton(opt, text="Tarcza antyspamowa", variable=self.la_shield).pack(side="left")
+        r += 1
+        hrow = ttk.Frame(b)
+        hrow.grid(row=r, column=0, columnspan=2, sticky="w", pady=(2, 12))
+        ttk.Label(hrow, text="Spam i 18+:").pack(side="left", padx=(0, 8))
+        ttk.Radiobutton(hrow, text="zwiń na dole listy", value="zwin", variable=self.la_hidden).pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(hrow, text="nie pokazuj wcale", value="usun", variable=self.la_hidden).pack(side="left")
+        r += 1
+
         row = ttk.Frame(b)
         row.grid(row=r, column=0, columnspan=2, sticky="e")
         ttk.Button(row, text="Otwórz config.toml", command=lambda: _open_path(app.cfg_path)).pack(side="left", padx=(0, 20))
@@ -483,6 +529,16 @@ class SettingsDialog(Dialog):
                     "limit_pierwszej_synchronizacji": int(limit),
                 },
                 "ai": {"klucz_api": self.v["klucz"].get().strip()},
+                "lokalne_ai": {
+                    "wlaczone": self.la_enabled.get(),
+                    "adres_ollama": self.v["la_url"].get().strip() or "http://127.0.0.1:11434",
+                    "model_tekst": self.v["la_text"].get().strip() or "auto",
+                    "model_obraz": self.v["la_vision"].get().strip() or "auto",
+                    "tlumacz_automatycznie": self.la_translate.get(),
+                    "sprawdzaj_zdjecia": self.la_images.get(),
+                    "ukryte": self.la_hidden.get(),
+                },
+                "filtr": {"tarcza": self.la_shield.get()},
             })
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Ustawienia", f"Nie udało się zapisać: {e}", parent=self)
@@ -601,6 +657,12 @@ class App:
         self.cfg_path = ensure_config_quiet()
         self.cfg = cfgmod.load(str(self.cfg_path))
         self.index = Index(self.cfg.index_path)
+        self.lai = LocalAI(self.cfg.local_ai, self.cfg.data_dir / "ai_cache.sqlite")
+        self.lai_status = None
+        self.all_hits: list[Hit] = []
+        self.show_hidden = False
+        self._revealed: set = set()
+        self._ai_run = 0
         self.hits: list[Hit] = []
         self.last_groups: list[list[str]] = []
         self.answer_visible = False
@@ -843,6 +905,7 @@ class App:
             self.tree.heading(col, text=title, anchor="w")
             self.tree.column(col, width=w, minwidth=36, stretch=st, anchor="w")
         self.tree.tag_configure("odd", background="#1f242c")
+        self.tree.tag_configure("hiddenrow", foreground="#6b7280", background="#191c22")
         sb = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -869,6 +932,9 @@ class App:
         self.detail.tag_configure("cardsite", foreground=MUTED, font=(self._font[0], 9, "bold"), lmargin1=12)
         self.detail.tag_configure("cardtitle", foreground=FG, font=(self._font[0], 12, "bold"), lmargin1=12, lmargin2=12)
         self.detail.tag_configure("card", foreground="#c3c9d2", lmargin1=12, lmargin2=12, spacing3=4)
+        self.detail.tag_configure("warn", foreground="#f59e0b", font=self._font)
+        self.detail.tag_configure("section", foreground=ACCENT, font=(self._font[0], 9, "bold"))
+        self.detail.tag_configure("summary", foreground=FG, font=(self._font[0], 12, "italic"))
         self.detail.tag_configure("follow", foreground=OK, font=self._font)
         self.detail.tag_bind("follow", "<Enter>", lambda *_: self.detail.configure(cursor="hand2"))
         self.detail.tag_bind("follow", "<Leave>", lambda *_: self.detail.configure(cursor="arrow"))
@@ -877,12 +943,16 @@ class App:
 
         # pasek stanu
         status = ttk.Frame(r, padding=(18, 8))
-        status.pack(fill="x")
+        status.pack(fill="x", side="bottom", before=self.vpane)
         self.status = ttk.Label(status, style="Muted.TLabel")
         self.status.pack(side="left")
         self.progress = ttk.Progressbar(status, mode="indeterminate", length=160)
         self.count = ttk.Label(status, style="Muted.TLabel")
         self.count.pack(side="right")
+        self.hidden_btn = ttk.Button(status, text="", command=self._toggle_hidden)
+        self.ai_label = ttk.Label(status, style="Muted.TLabel", cursor="hand2")
+        self.ai_label.pack(side="left", padx=(16, 0))
+        self.ai_label.bind("<Button-1>", lambda *_: self._ai_label_click())
 
         r.after(60, lambda: self.hpane.sashpos(0, int(self.hpane.winfo_width() * 0.64)))
         r.bind("<Control-f>", lambda *_: self.qentry.focus_set())
@@ -890,6 +960,7 @@ class App:
         self._mode_changed()
         self._welcome()
         self.qentry.focus_set()
+        self.root.after(300, self.check_local_ai)
 
     # ------------------------------------------------------------ pomocnicze
     def _set_busy(self, busy: bool):
@@ -956,6 +1027,8 @@ class App:
     def reload_config(self):
         self.cfg = cfgmod.load(str(self.cfg_path))
         self.bg.run(self.drop_shared)   # nowe api_id/hash → nowe połączenie
+        self.lai = LocalAI(self.cfg.local_ai, self.cfg.data_dir / "ai_cache.sqlite")
+        self.check_local_ai()
         self.refresh_meta()
 
     def clear_filters(self):
@@ -1141,20 +1214,14 @@ class App:
         self._set_answer([(friendly_error(e), "muted")])
 
     def show_results(self, r: service.Result):
-        self.hits = r.hits
+        self.all_hits = list(r.hits)
         self.last_groups = r.query.keyword_groups
-        self.tree.delete(*self.tree.get_children())
-        for n, h in enumerate(r.hits, 1):
-            snip = make_snippet(h.text, r.query.keyword_groups, width=140, lead=14)
-            icon = MEDIA_LABELS.get(h.media or "")
-            if icon:
-                snip = f"{icon} {snip}"
-            self.tree.insert("", "end", iid=str(n - 1), tags=("odd",) if n % 2 == 0 else (),
-                             values=(n, local_time(h.date), h.chat_name, h.sender_name or "?", snip))
-        info = f"{len(r.hits)} wyników"
-        if r.notes:
-            info = " ".join(r.notes) + "   " + info
-        self.count.configure(text=info)
+        self._result_notes = list(r.notes)
+        self._keep_order = self.mode.get() == "ai" and not isinstance(r, service.GlobalOutcome)
+        self.show_hidden = False
+        for h in self.all_hits:
+            self._apply_shield(h)
+        self._render_list(select_first=True)
 
         if self.mode.get() == "ai" and not isinstance(r, service.GlobalOutcome):
             parts = []
@@ -1165,12 +1232,162 @@ class App:
             parts.append(("\n\nSzukano: " + service.describe_query(r.query), "muted"))
             self._set_answer(parts)
 
-        if r.hits:
-            self.tree.selection_set("0")
-            self.tree.see("0")
-        else:
+        if not r.hits:
             self._set_detail_text([("Brak wyników.\n\n", "who"),
                                    ("Spróbuj gwiazdki (anten*), innego słowa albo usuń filtry.", "meta")])
+        self._start_ai_review()
+
+    # ---------------------------------------------------- tarcza i lokalne AI
+    def _is_hidden_chat(self, h) -> bool:
+        hidden = set(self.cfg.filters.hidden_chats)
+        return bool(hidden) and (str(h.chat_id) in hidden or h.chat_name in hidden)
+
+    def _apply_shield(self, h):
+        if h.verdict and h.verdict.get("src") == "AI":
+            return
+        cat, why = (None, "")
+        if self.cfg.filters.shield:
+            cat, why = shield.classify(h.text, h.chat_name, h.sender_name or "", h.media,
+                                       shield.is_public_origin(h.chat_type))
+        h.verdict = {"cat": cat, "src": "tarcza", "why": why} if cat else None
+
+    def _hidden(self, h) -> bool:
+        if self._is_hidden_chat(h):
+            return True
+        return bool(h.verdict and h.verdict.get("cat") in shield.HIDDEN_CATEGORIES)
+
+    def _render_list(self, select_first=False):
+        sel_hit = None
+        sel = self.tree.selection()
+        if sel and not select_first:
+            try:
+                sel_hit = self.hits[int(sel[0])]
+            except (IndexError, ValueError):
+                sel_hit = None
+        if self._keep_order:
+            shown = list(self.all_hits)
+            hidden = []
+        else:
+            shown = [h for h in self.all_hits if not self._hidden(h)]
+            hidden = [h for h in self.all_hits if self._hidden(h)]
+            if self.show_hidden and self.cfg.local_ai.hidden_mode != "usun":
+                shown += hidden
+        self.hits = shown
+        self.tree.delete(*self.tree.get_children())
+        for n, h in enumerate(shown, 1):
+            v = h.verdict or {}
+            if v.get("pl") and self.cfg.local_ai.auto_translate:
+                snip = "⇄ " + " ".join(v["pl"].split())[:160]
+            else:
+                snip = make_snippet(h.text, self.last_groups, width=140, lead=14)
+            icon = MEDIA_LABELS.get(h.media or "")
+            if icon:
+                snip = f"{icon} {snip}"
+            if v.get("cat") in ("news",):
+                snip = "📰 " + snip
+            tags = ["odd"] if n % 2 == 0 else []
+            if self._hidden(h):
+                tags = ["hiddenrow"]
+            self.tree.insert("", "end", iid=str(n - 1), tags=tuple(tags),
+                             values=(n, local_time(h.date), h.chat_name, h.sender_name or "?", snip))
+        info = f"{len(shown) if not hidden or self.show_hidden else len(shown)} wyników"
+        if self._result_notes:
+            info = " ".join(self._result_notes) + "   " + info
+        self.count.configure(text=info)
+        if hidden and self.cfg.local_ai.hidden_mode != "usun":
+            self.hidden_btn.configure(text=("Schowaj ukryte" if self.show_hidden else f"Pokaż ukryte ({len(hidden)})"))
+            self.hidden_btn.pack(side="right", padx=(0, 12))
+        elif hidden:
+            self.hidden_btn.pack_forget()
+            self.count.configure(text=info + f"  ·  ukryto {len(hidden)} (spam / 18+)")
+        else:
+            self.hidden_btn.pack_forget()
+        if shown:
+            idx = shown.index(sel_hit) if sel_hit in shown else 0
+            if select_first or sel_hit is None or sel_hit in shown:
+                self.tree.selection_set(str(idx))
+                self.tree.see(str(idx))
+        elif self.all_hits:
+            self._set_detail_text([("Wszystkie wyniki ukryte jako spam / 18+.\n\n", "who"),
+                                   ("Kliknij „Pokaż ukryte” na dole, żeby je zobaczyć.", "meta")])
+
+    def _toggle_hidden(self):
+        self.show_hidden = not self.show_hidden
+        self._render_list()
+
+    def check_local_ai(self):
+        def work():
+            return self.lai.status(refresh=True)
+
+        def done(st):
+            self.lai_status = st
+            self._update_ai_label()
+
+        self.bg.run(work, done, lambda e: None)
+
+    def _update_ai_label(self):
+        st = self.lai_status or {}
+        if not st or not self.cfg.local_ai.enabled:
+            self.ai_label.configure(text="Lokalne AI: wyłączone" if not self.cfg.local_ai.enabled else "")
+        elif st.get("text"):
+            vis = st.get("vision")
+            self.ai_label.configure(text=f"🧠 {st['text']}" + (f" · 👁 {vis}" if vis else f"  ·  brak modelu obrazu — pobierz {RECOMMENDED_VISION}"))
+        else:
+            self.ai_label.configure(text="Lokalne AI: " + (st.get("error") or "niedostępne"))
+
+    def _ai_label_click(self):
+        st = self.lai_status or {}
+        if st.get("backend") == "ollama" and not st.get("vision"):
+            if messagebox.askyesno("Model obrazu", f"Pobrać model {RECOMMENDED_VISION} (ok. 6 GB) do Ollamy?\n"
+                                                   "Służy do sprawdzania zdjęć z publicznych kanałów przed pokazaniem."):
+                self.pull_model(RECOMMENDED_VISION)
+        else:
+            self.open_settings()
+
+    def pull_model(self, name):
+        win = LogWindow(self, f"Pobieram {name}")
+
+        def work():
+            self.lai.pull(name, lambda m: self.bg.call_ui(win.append, m))
+            return name
+
+        def done(n):
+            win.finish(f"Pobrano {n}.", ok=True)
+            self.check_local_ai()
+
+        self.bg.run(work, done, lambda e: win.finish(friendly_error(e), ok=False))
+
+    def _start_ai_review(self):
+        st = self.lai_status or {}
+        if not (self.cfg.local_ai.enabled and st.get("text") and self.all_hits):
+            return
+        self._ai_run += 1
+        run = self._ai_run
+        hits = list(self.all_hits[:200])
+        by_key = {id(h): h for h in hits}
+        items = [{"key": id(h), "text": h.text, "chat": h.chat_name, "sender": h.sender_name or ""} for h in hits]
+
+        def apply(partial):
+            if run != self._ai_run:
+                return
+            for k, v in partial.items():
+                h = by_key.get(k)
+                if h is None:
+                    continue
+                cat = v.get("kategoria")
+                h.verdict = {"cat": cat, "src": "AI", "why": "lokalne AI", "lang": v.get("jezyk"),
+                             "pl": v.get("tlumaczenie") or ""}
+            self._render_list()
+            self.count.configure(text=self.count.cget("text") + "   🧠 AI ocenia…")
+
+        def work():
+            return self.lai.classify(items, on_partial=lambda part: self.bg.call_ui(apply, part))
+
+        def done(_):
+            if run == self._ai_run:
+                self._render_list()
+
+        self.bg.run(work, done, lambda e: (log_error(e), self._render_list()))
 
     def _show_answer(self):
         if not self.answer_visible:
@@ -1271,14 +1488,32 @@ class App:
         kind = MEDIA_LABELS.get(h.media or "", "")
         d.insert("end", f"{h.chat_name}  ·  {local_time(h.date)}  ·  {origin}  {kind}\n\n", "meta")
 
-        # zdjęcie / miniatura
+        v = h.verdict or {}
+        if v.get("cat"):
+            src = "lokalne AI" if v.get("src") == "AI" else f"tarcza: {v.get('why')}"
+            d.insert("end", f"Ocena: {shield.LABELS.get(v['cat'], v['cat'])}  ({src})\n\n",
+                     "warn" if v["cat"] in shield.HIDDEN_CATEGORIES else "meta")
+
+        # zdjęcie / miniatura (z publicznych kanałów — dopiero po sprawdzeniu)
         if media_state == "loading":
             d.insert("end", "Ładuję zdjęcie…\n\n", "meta")
         elif isinstance(media_state, dict):
             if media_state.get("path"):
-                self._insert_image(media_state["path"])
+                self._insert_gated_image(h, media_state["path"])
             elif media_state.get("error"):
                 d.insert("end", f"(nie udało się pobrać zdjęcia: {media_state['error']})\n\n", "meta")
+
+        # tłumaczenie (lokalne AI)
+        tr = self._translations.get(self._hkey(h)) if hasattr(self, "_translations") else None
+        if tr and tr.get("tlumaczenie"):
+            d.insert("end", f"TŁUMACZENIE NA POLSKI  (z: {tr.get('jezyk') or '?'}, lokalne AI)\n", "section")
+            if tr.get("streszczenie"):
+                d.insert("end", tr["streszczenie"] + "\n\n", "summary")
+            d.insert("end", tr["tlumaczenie"] + "\n\n")
+            d.insert("end", "ORYGINAŁ\n", "section")
+        elif tr is None and self._wants_translation(h):
+            d.insert("end", "⇄ tłumaczę na polski…\n\n", "meta")
+            self._load_translation(h)
 
         # pełna treść z podświetleniem i klikalnymi linkami
         start = d.index("end-1c")
@@ -1326,13 +1561,126 @@ class App:
                 d.insert("end", "     ")
                 self._action(d, "📱 W aplikacji Telegram", lambda: browser.open_url(tg, self.cfg.data_dir))
             uname = _username_from_link(h.link)
+            if (h.verdict or {}).get("cat") in shield.HIDDEN_CATEGORIES:
+                uname = None          # spamu nie proponujemy do obserwowania
             if uname and uname.lower() not in {fold(x).lstrip("@").replace("https://t.me/", "") for x in self.cfg.telegram.watched}:
                 d.insert("end", "     ")
                 d.insert("end", f"＋ Obserwuj @{uname}", ("follow",))
                 self._follow_target = uname
         else:
             d.insert("end", "Czat prywatny / mała grupa — Telegram nie daje linków do takich wiadomości.", "meta")
+        if h.chat_id and (shield.is_public_origin(h.chat_type) or v.get("cat") in shield.HIDDEN_CATEGORIES):
+            d.insert("end", "\n\n")
+            self._action(d, "🚫 Ukryj ten kanał na zawsze", lambda: self.hide_chat(h))
         d.configure(state="disabled")
+
+    # ------------------------------------------------ tłumaczenie i zdjęcia
+    @staticmethod
+    def _hkey(h):
+        return (h.source, str(h.chat_id), h.msg_id, h.text[:50])
+
+    def _wants_translation(self, h) -> bool:
+        st = self.lai_status or {}
+        if not (self.cfg.local_ai.enabled and self.cfg.local_ai.auto_translate and st.get("text")):
+            return False
+        v = h.verdict or {}
+        if v.get("cat") in shield.HIDDEN_CATEGORIES:
+            return False
+        if v.get("lang"):
+            return not v["lang"].startswith("pl")
+        letters = re.sub(r"[^\w]", "", h.text)
+        return len(letters) > 15
+
+    def _load_translation(self, h):
+        if not hasattr(self, "_translations"):
+            self._translations = {}
+        key = self._hkey(h)
+        if key in self._translations or getattr(self, "_tr_pending", None) == key:
+            return
+        self._tr_pending = key
+
+        def work():
+            return self.lai.translate(h.text)
+
+        def done(tr):
+            self._translations[key] = tr
+            self._tr_pending = None
+            if tr.get("jezyk") and h.verdict is not None:
+                h.verdict.setdefault("lang", tr["jezyk"])
+            sel = self.tree.selection()
+            if sel and self.hits[int(sel[0])] is h:
+                self._rerender_current(h)
+
+        def err(e):
+            log_error(e)
+            self._translations[key] = {"tlumaczenie": "", "jezyk": ""}
+            self._tr_pending = None
+
+        self.bg.run(work, done, err)
+
+    def _rerender_current(self, h):
+        cached = self._media_cache_path(h) if self._wants_media(h) else None
+        state = {"path": str(cached), "media": h.media, "extra": h.extra} if cached and cached.exists() else None
+        self._render_detail(h, media_state=state)
+
+    def _insert_gated_image(self, h, path):
+        key = self._hkey(h)
+        public = shield.is_public_origin(h.chat_type) or (h.verdict or {}).get("cat") in shield.HIDDEN_CATEGORIES
+        if not public or key in self._revealed:
+            self._insert_image(path)
+            return
+        st = self.lai_status or {}
+        checks = getattr(self, "_img_checks", {})
+        self._img_checks = checks
+        if self.cfg.local_ai.enabled and self.cfg.local_ai.check_images and st.get("vision"):
+            res = checks.get(path)
+            if res is None:
+                self.detail.insert("end", "👁 Lokalne AI sprawdza zdjęcie…\n\n", "meta")
+                checks[path] = "pending"
+
+                def work():
+                    return self.lai.check_image(path)
+
+                def done(r):
+                    checks[path] = r
+                    sel = self.tree.selection()
+                    if sel and self.hits[int(sel[0])] is h:
+                        self._rerender_current(h)
+
+                def err(e):
+                    log_error(e)
+                    checks[path] = {"bezpieczne": False, "opis": "", "blad": friendly_error(e)}
+
+                self.bg.run(work, done, err)
+                return
+            if res == "pending":
+                self.detail.insert("end", "👁 Lokalne AI sprawdza zdjęcie…\n\n", "meta")
+                return
+            if res.get("bezpieczne"):
+                self._insert_image(path)
+                if res.get("opis"):
+                    self.detail.insert("end", f"👁 {res['opis']}\n\n", "meta")
+                return
+            why = ("treści dla dorosłych" if res.get("dorosli") else "drastyczne" if res.get("przemoc_drastyczna")
+                   else "spam / reklama" if res.get("spam") else res.get("blad") or "niepewne")
+            self.detail.insert("end", f"🔞 Zdjęcie ukryte (lokalne AI: {why}).  ", "warn")
+        else:
+            self.detail.insert("end", "🖼 Zdjęcie z kanału spoza Twoich czatów jest zasłonięte.  ", "meta")
+        self._action(self.detail, "Pokaż mimo to", lambda: (self._revealed.add(key), self._rerender_current(h)))
+        if st.get("backend") == "ollama" and not st.get("vision"):
+            self.detail.insert("end", "   ")
+            self._action(self.detail, f"Pobierz model obrazu ({RECOMMENDED_VISION})",
+                         lambda: self.pull_model(RECOMMENDED_VISION))
+        self.detail.insert("end", "\n\n")
+
+    def hide_chat(self, h):
+        ref = str(h.chat_id)
+        if not messagebox.askyesno("Ukryj kanał", f"Ukrywać zawsze wyniki z „{h.chat_name}”?\n"
+                                                  "Cofniesz to w config.toml ([filtr] ukryte_kanaly)."):
+            return
+        cfgmod.add_hidden_chat(self.cfg_path, ref)
+        self.cfg = cfgmod.load(str(self.cfg_path))
+        self._render_list()
 
     def _insert_image(self, path):
         try:

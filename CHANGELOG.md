@@ -1,5 +1,22 @@
 # Historia zmian
 
+## v1.2.0 — 2026-11-07
+
+#### Nowe
+- **Lokalne AI (Ollama / LM Studio)**: ocena każdego wyniku (news, rozmowa, reklama, spam, 18+, oszustwo),
+  automatyczne tłumaczenie obcych języków na polski (na liście i w podglądzie, ze streszczeniem),
+  sprawdzanie zdjęć z kanałów spoza Twoich czatów modelem obrazu przed pokazaniem. Wszystko lokalnie.
+- Automatyczny wybór modeli z zainstalowanych (tekst: np. qwen3:14b, obraz: np. qwen3-vl:8b)
+  i pobieranie modelu obrazu jednym kliknięciem z postępem.
+- **Tarcza antyspamowa bez AI**: ściana przypadkowych hashtagów przy obrazku, konta-persony,
+  ozdobne nazwy kanałów, kasyna, narkotyki, 18+ (reguły z KRONOS-7, rozszerzone o polski i angielski).
+- Spam i 18+ zwijane na dół listy (**Pokaż ukryte (N)**) albo usuwane całkiem.
+- **🚫 Ukryj ten kanał na zawsze**.
+- Sekcja **Lokalne AI** w Ustawieniach, wskaźnik modeli w pasku stanu.
+
+#### Zmiany
+- Pasek stanu zawsze widoczny na dole okna.
+
 ## v1.1.0 — 2026-11-07
 
 #### Nowe

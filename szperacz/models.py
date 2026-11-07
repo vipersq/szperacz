@@ -86,3 +86,4 @@ class Hit:
     media: str | None = None
     extra: dict | None = None
     is_out: bool = False
+    verdict: dict | None = None     # ocena: {"cat","src","why","lang","pl"} (tarcza / lokalne AI)

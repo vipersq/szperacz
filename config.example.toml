@@ -37,3 +37,24 @@ model_zapytan = "claude-haiku-5-5"
 # Model do streszczenia wyników i odpowiedzi:
 model_odpowiedzi = "claude-sonnet-5-5"
 max_wynikow_do_odpowiedzi = 40
+
+[lokalne_ai]
+# Lokalne AI przez Ollamę (albo LM Studio): ocenia wyniki (news / spam / 18+),
+# tłumaczy na polski i sprawdza zdjęcia z publicznych kanałów. Nic nie wychodzi do internetu.
+wlaczone = true
+adres_ollama = "http://127.0.0.1:11434"
+adres_lmstudio = "http://127.0.0.1:1234"
+# "auto" = wybierz z zainstalowanych (tekst: np. qwen3:14b, obraz: np. qwen3-vl:8b)
+model_tekst = "auto"
+model_obraz = "auto"
+tlumacz_automatycznie = true
+jezyk_docelowy = "polski"
+sprawdzaj_zdjecia = true
+# "zwin" = ukryte wyniki na dole listy (przycisk „Pokaż ukryte”), "usun" = w ogóle ich nie pokazuj
+ukryte = "zwin"
+
+[filtr]
+# Tarcza antyspamowa bez AI (ściana hashtagów, kasyna, 18+ itp.)
+tarcza = true
+# Kanały, które ukryłeś przyciskiem „🚫 Ukryj kanał” (id albo nazwa)
+ukryte_kanaly = []

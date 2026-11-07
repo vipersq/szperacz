@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-TEMPLATE = '# Skopiuj ten plik jako config.toml i uzupełnij.\n\n[ogolne]\n# Tu trafi indeks (indeks.sqlite) i sesja Telegrama (telegram.session).\nkatalog_danych = "dane"\n\n[telegram]\n# Z https://my.telegram.org -> API development tools\napi_id = 0\napi_hash = ""\n# Opcjonalnie, np. "+447700900123" (inaczej program zapyta przy logowaniu)\ntelefon = ""\n\n# Puste = indeksuj wszystkie czaty. Fragmenty nazw, wielkość liter i ogonki bez znaczenia.\ntylko_czaty = []\n# np. ["BBC", "Reuters"] — duże kanały informacyjne, których nie chcesz w indeksie\npomin_czaty = []\n# true = pomiń wszystkie kanały (broadcast); grupy i prywatne zostają\npomin_kanaly = false\n\n# Publiczne kanały/grupy, do których NIE należysz, a chcesz je indeksować\n# (czytane bez dołączania). Np. ["@bbcnews", "https://t.me/rsgb_main"]\nobserwowane = []\n# Ile ostatnich wiadomości pobrać z obserwowanego kanału przy pierwszej synchronizacji\nlimit_obserwowanych = 2000\n\n# Przy PIERWSZEJ synchronizacji czatu: ile najnowszych wiadomości pobrać.\n# 0 = cała historia (przy dużych grupach może trwać długo — Telegram ogranicza tempo).\nlimit_pierwszej_synchronizacji = 0\n\n[ai]\n# Klucz Claude API (console.anthropic.com). Lepiej ustawić zmienną środowiskową\n# ANTHROPIC_API_KEY niż wpisywać tutaj. Bez klucza działa "szukaj", nie działa "pytaj".\nklucz_api = ""\n# Tani i szybki model do zamiany promptu na zapytanie:\nmodel_zapytan = "claude-haiku-5-5"\n# Model do streszczenia wyników i odpowiedzi:\nmodel_odpowiedzi = "claude-sonnet-5-5"\nmax_wynikow_do_odpowiedzi = 40\n'
+TEMPLATE = '# Skopiuj ten plik jako config.toml i uzupełnij.\n\n[ogolne]\n# Tu trafi indeks (indeks.sqlite) i sesja Telegrama (telegram.session).\nkatalog_danych = "dane"\n\n[telegram]\n# Z https://my.telegram.org -> API development tools\napi_id = 0\napi_hash = ""\n# Opcjonalnie, np. "+447700900123" (inaczej program zapyta przy logowaniu)\ntelefon = ""\n\n# Puste = indeksuj wszystkie czaty. Fragmenty nazw, wielkość liter i ogonki bez znaczenia.\ntylko_czaty = []\n# np. ["BBC", "Reuters"] — duże kanały informacyjne, których nie chcesz w indeksie\npomin_czaty = []\n# true = pomiń wszystkie kanały (broadcast); grupy i prywatne zostają\npomin_kanaly = false\n\n# Publiczne kanały/grupy, do których NIE należysz, a chcesz je indeksować\n# (czytane bez dołączania). Np. ["@bbcnews", "https://t.me/rsgb_main"]\nobserwowane = []\n# Ile ostatnich wiadomości pobrać z obserwowanego kanału przy pierwszej synchronizacji\nlimit_obserwowanych = 2000\n\n# Przy PIERWSZEJ synchronizacji czatu: ile najnowszych wiadomości pobrać.\n# 0 = cała historia (przy dużych grupach może trwać długo — Telegram ogranicza tempo).\nlimit_pierwszej_synchronizacji = 0\n\n[ai]\n# Klucz Claude API (console.anthropic.com). Lepiej ustawić zmienną środowiskową\n# ANTHROPIC_API_KEY niż wpisywać tutaj. Bez klucza działa "szukaj", nie działa "pytaj".\nklucz_api = ""\n# Tani i szybki model do zamiany promptu na zapytanie:\nmodel_zapytan = "claude-haiku-5-5"\n# Model do streszczenia wyników i odpowiedzi:\nmodel_odpowiedzi = "claude-sonnet-5-5"\nmax_wynikow_do_odpowiedzi = 40\n\n[lokalne_ai]\n# Lokalne AI przez Ollamę (albo LM Studio): ocenia wyniki (news / spam / 18+),\n# tłumaczy na polski i sprawdza zdjęcia z publicznych kanałów. Nic nie wychodzi do internetu.\nwlaczone = true\nadres_ollama = "http://127.0.0.1:11434"\nadres_lmstudio = "http://127.0.0.1:1234"\n# "auto" = wybierz z zainstalowanych (tekst: np. qwen3:14b, obraz: np. qwen3-vl:8b)\nmodel_tekst = "auto"\nmodel_obraz = "auto"\ntlumacz_automatycznie = true\njezyk_docelowy = "polski"\nsprawdzaj_zdjecia = true\n# "zwin" = ukryte wyniki na dole listy (przycisk „Pokaż ukryte”), "usun" = w ogóle ich nie pokazuj\nukryte = "zwin"\n\n[filtr]\n# Tarcza antyspamowa bez AI (ściana hashtagów, kasyna, 18+ itp.)\ntarcza = true\n# Kanały, które ukryłeś przyciskiem „🚫 Ukryj kanał” (id albo nazwa)\nukryte_kanaly = []\n'
 
 
 class ConfigError(RuntimeError):
@@ -36,11 +36,32 @@ class AiCfg:
 
 
 @dataclass
+class LocalAiCfg:
+    enabled: bool = True
+    ollama_url: str = "http://127.0.0.1:11434"
+    lmstudio_url: str = "http://127.0.0.1:1234"
+    text_model: str = "auto"
+    vision_model: str = "auto"
+    auto_translate: bool = True
+    target_lang: str = "polski"
+    check_images: bool = True
+    hidden_mode: str = "zwin"       # "zwin" albo "usun"
+
+
+@dataclass
+class FilterCfg:
+    shield: bool = True
+    hidden_chats: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     base_dir: Path
     data_dir: Path
     telegram: TelegramCfg
     ai: AiCfg
+    local_ai: LocalAiCfg = field(default_factory=LocalAiCfg)
+    filters: FilterCfg = field(default_factory=FilterCfg)
 
     @property
     def index_path(self) -> Path:
@@ -92,7 +113,22 @@ def load(explicit: str | None = None) -> Config:
         answer_model=a.get("model_odpowiedzi", AiCfg.answer_model),
         max_results_for_answer=int(a.get("max_wynikow_do_odpowiedzi", 40)),
     )
-    return Config(base_dir=base, data_dir=data_dir, telegram=tg, ai=ai)
+    la = raw.get("lokalne_ai", {})
+    local = LocalAiCfg(
+        enabled=bool(la.get("wlaczone", True)),
+        ollama_url=str(la.get("adres_ollama", LocalAiCfg.ollama_url)).rstrip("/"),
+        lmstudio_url=str(la.get("adres_lmstudio", LocalAiCfg.lmstudio_url)).rstrip("/"),
+        text_model=str(la.get("model_tekst", "auto")) or "auto",
+        vision_model=str(la.get("model_obraz", "auto")) or "auto",
+        auto_translate=bool(la.get("tlumacz_automatycznie", True)),
+        target_lang=str(la.get("jezyk_docelowy", "polski")),
+        check_images=bool(la.get("sprawdzaj_zdjecia", True)),
+        hidden_mode="usun" if str(la.get("ukryte", "zwin")).lower().startswith("u") else "zwin",
+    )
+    f = raw.get("filtr", {})
+    flt = FilterCfg(shield=bool(f.get("tarcza", True)),
+                    hidden_chats=[str(x) for x in f.get("ukryte_kanaly", []) if str(x).strip()])
+    return Config(base_dir=base, data_dir=data_dir, telegram=tg, ai=ai, local_ai=local, filters=flt)
 
 
 def _toml_value(v) -> str:
@@ -146,6 +182,16 @@ def add_watched(path: Path, ref: str) -> bool:
     if any(norm(x) == norm(ref) for x in cur):
         return False
     update_values(path, {"telegram": {"obserwowane": cur + [ref]}})
+    return True
+
+
+def add_hidden_chat(path: Path, ref: str) -> bool:
+    """Dopisuje kanał do [filtr] ukryte_kanaly. False, jeśli już był."""
+    with open(path, "rb") as fh:
+        cur = list(tomllib.load(fh).get("filtr", {}).get("ukryte_kanaly", []))
+    if ref in cur:
+        return False
+    update_values(path, {"filtr": {"ukryte_kanaly": cur + [ref]}})
     return True
 
 

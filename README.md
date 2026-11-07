@@ -20,6 +20,12 @@ Kolejne komunikatory dochodzą jako osobne konektory.
 - **＋ Obserwuj**: dowolny publiczny kanał trafia do indeksu bez dołączania.
 - **Podgląd ze zdjęciami**: zdjęcia, miniatury wideo i plików oraz pełne opisy podglądów linków
   (tytuł, strona, cały opis). Klikalne linki w treści.
+- **🧠 Lokalne AI (Ollama / LM Studio)**: każdy wynik dostaje ocenę (news, rozmowa, reklama, spam, 18+,
+  oszustwo). Spam i treści dla dorosłych są zwijane na dole listy. Obce języki są **automatycznie tłumaczone
+  na polski**, a zdjęcia z kanałów spoza Twoich czatów pokazują się dopiero po sprawdzeniu modelem obrazu.
+  Nic nie wychodzi do internetu.
+- **Tarcza antyspamowa** (działa też bez AI): rozpoznaje typowy spam z wyszukiwania po hashtagach
+  (obrazek + ściana przypadkowych tagów, konta-persony, kasyna, 18+). Przycisk „🚫 Ukryj ten kanał na zawsze”.
 - **Filtry**: okres (dziś, wczoraj, 7/30 dni, miesiąc, rok…), pora dnia, rodzaj czatu, zawartość
   (zdjęcia, wideo, pliki, linki, audio, ankiety, lokalizacje), moje lub cudze wiadomości, sortowanie.
 - **🌐 Wbudowana przeglądarka** (silnik Edge WebView2): linki otwierają się w Szperaczu, a publiczne
@@ -27,6 +33,8 @@ Kolejne komunikatory dochodzą jako osobne konektory.
 - **Logowanie kodem QR**: skanujesz telefonem, kod SMS niepotrzebny.
 - **Tylko odczyt**: program niczego nie wysyła, nie edytuje i nie usuwa.
 - Okno (Tkinter, ciemny motyw), wiersz poleceń i gotowe exe dla Windows.
+
+![Lokalne AI: spam ukryty, news przetłumaczony](docs/lokalne-ai.png)
 
 | Filtry i zdjęcia w podglądzie | Pełny opis podglądu linku |
 |---|---|
@@ -149,6 +157,24 @@ Harmonogram zadań Windows → nowe zadanie co godzinę:
 `<folder projektu>\.venv\Scripts\szperacz.exe sync` (albo `SzperaczCLI.exe sync`),
 folder startowy = folder projektu.
 
+## 🧠 Lokalne AI
+
+Szperacz korzysta z Ollamy (albo LM Studio) na Twoim komputerze, tej samej co KRONOS-7.
+Modele wybiera sam z zainstalowanych:
+
+| Zadanie | Model (domyślnie) | Rozmiar |
+|---|---|---|
+| ocena wyników i tłumaczenie | `qwen3:14b` (albo inny zainstalowany model tekstowy) | ok. 9 GB |
+| sprawdzanie zdjęć | `qwen3-vl:8b`, do pobrania jednym kliknięciem w pasku na dole | ok. 6 GB |
+
+- Po każdym wyszukiwaniu wyniki są oceniane w tle (partiami, z pamięcią podręczną w `dane/ai_cache.sqlite`).
+- Spam i 18+ trafiają na dół listy pod przyciskiem **Pokaż ukryte (N)** (albo znikają całkiem, jeśli tak ustawisz).
+- Wiadomości w obcym języku mają na liście polskie tłumaczenie (⇄), a w podglądzie pełne tłumaczenie,
+  jednozdaniowe streszczenie i oryginał.
+- Zdjęcie z kanału spoza Twoich czatów jest najpierw sprawdzane modelem obrazu. Nieodpowiednie zostaje
+  zasłonięte z opcją „Pokaż mimo to”. Bez modelu obrazu takie zdjęcia są zasłonięte, dopóki ich nie odsłonisz.
+- Ustawienia: **Ustawienia → Lokalne AI** (adres, modele, tłumaczenie, sprawdzanie zdjęć, zwijanie / usuwanie, tarcza).
+
 ## 🌐 Szukanie w całym Telegramie
 
 Tryb „Cały Telegram” w oknie albo `szperacz wszedzie` w konsoli łączy cztery źródła:
@@ -195,6 +221,8 @@ szperacz/
   service.py           logika wspólna dla okna i konsoli
   gui.py               okno (Tkinter)
   browser.py           wbudowana przeglądarka (pywebview / Edge WebView2, osobny proces)
+  localai.py           lokalne AI: Ollama / LM Studio, ocena, tłumaczenie, zdjęcia, cache
+  shield.py            tarcza antyspamowa (reguły bez AI)
   cli.py               polecenia
 tests/                 testy (pytest), bez sieci: udawany Telegram i udawany Claude
 docs/                  zrzuty ekranu
