@@ -173,6 +173,9 @@ Modele wybiera sam z zainstalowanych:
   jednozdaniowe streszczenie i oryginał.
 - Zdjęcie z kanału spoza Twoich czatów jest najpierw sprawdzane modelem obrazu. Nieodpowiednie zostaje
   zasłonięte z opcją „Pokaż mimo to”. Bez modelu obrazu takie zdjęcia są zasłonięte, dopóki ich nie odsłonisz.
+- Na dole okna jest **monitor**: obciążenie GPU i VRAM, temperatura, pobór mocy (z `nvidia-smi`),
+  model trzymany przez Ollamę w pamięci oraz bieżąca praca AI („oceniam wyniki 4/11”, „tłumaczę”).
+- Jeśli Ollama nie działa, Szperacz sam ją uruchamia w tle.
 - Ustawienia: **Ustawienia → Lokalne AI** (adres, modele, tłumaczenie, sprawdzanie zdjęć, zwijanie / usuwanie, tarcza).
 
 ## 🌐 Szukanie w całym Telegramie

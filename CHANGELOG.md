@@ -13,6 +13,9 @@
 - Spam i 18+ zwijane na dół listy (**Pokaż ukryte (N)**) albo usuwane całkiem.
 - **🚫 Ukryj ten kanał na zawsze**.
 - Sekcja **Lokalne AI** w Ustawieniach, wskaźnik modeli w pasku stanu.
+- **Monitor GPU i modelu** na dole okna: obciążenie karty i VRAM (paski), temperatura, pobór mocy,
+  model trzymany przez Ollamę w pamięci (VRAM/RAM) oraz co lokalne AI w tej chwili robi.
+- Szperacz sam uruchamia Ollamę w tle, jeśli nie działa (jak KRONOS-7).
 
 #### Zmiany
 - Pasek stanu zawsze widoczny na dole okna.

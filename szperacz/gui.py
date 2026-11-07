@@ -21,7 +21,7 @@ from .index import Index, _clean_term, fold, make_snippet
 from . import browser
 from .browser import telegram_app_link
 from . import shield
-from .localai import RECOMMENDED_VISION, LocalAI
+from .localai import RECOMMENDED_VISION, LocalAI, gpu_stats
 from .models import MEDIA_LABELS, Hit, Query
 
 # ------------------------------------------------------------------ kolory
@@ -959,6 +959,19 @@ class App:
         self.ai_label.pack(side="left", padx=(16, 0))
         self.ai_label.bind("<Button-1>", lambda *_: self._ai_label_click())
 
+        # monitor GPU i modelu (druga linia paska stanu)
+        mon = ttk.Frame(r, padding=(18, 0, 18, 6))
+        mon.pack(fill="x", side="bottom", before=status)
+        self.gpu_canvas = tk.Canvas(mon, width=170, height=22, bg=BG, highlightthickness=0)
+        self.gpu_canvas.pack(side="left")
+        self.gpu_label = ttk.Label(mon, style="Muted.TLabel", text="GPU: sprawdzam…")
+        self.gpu_label.pack(side="left", padx=(8, 0))
+        self.model_label = ttk.Label(mon, style="Muted.TLabel")
+        self.model_label.pack(side="left", padx=(18, 0))
+        self.activity_label = ttk.Label(mon, foreground=ACCENT, background=BG)
+        self.activity_label.pack(side="right")
+        self._activity: dict[str, str] = {}
+
         r.after(60, lambda: self.hpane.sashpos(0, int(self.hpane.winfo_width() * 0.64)))
         r.bind("<Control-f>", lambda *_: self.qentry.focus_set())
         r.bind("<Escape>", lambda *_: self.qvar.set(""))
@@ -966,6 +979,7 @@ class App:
         self._welcome()
         self.qentry.focus_set()
         self.root.after(300, self.check_local_ai)
+        self.root.after(800, self._poll_monitor)
 
     # ------------------------------------------------------------ pomocnicze
     def _set_busy(self, busy: bool):
@@ -1330,6 +1344,64 @@ class App:
 
         self.bg.run(work, done, lambda e: None)
 
+    # ------------------------------------------------ monitor GPU / modelu
+    def _poll_monitor(self):
+        """Co 2 s: obciążenie karty (nvidia-smi) i modele w pamięci Ollamy. Osobny wątek —
+        nie blokuje okna i nie zapala wskaźnika pracy."""
+        def work():
+            g = gpu_stats()
+            models = self.lai.loaded_models() if (self.lai_status or {}).get("backend") == "ollama" else []
+            self.bg.call_ui(self._show_monitor, g, models)
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(2000, self._poll_monitor)
+
+    def _show_monitor(self, g, models):
+        c = self.gpu_canvas
+        c.delete("all")
+        if not g:
+            self.gpu_label.configure(text="GPU: brak danych (nvidia-smi niedostępne)")
+        else:
+            util = g.get("util") or 0
+            mem = (g["mem_used"] / g["mem_total"] * 100) if g.get("mem_total") else 0
+
+            def bar(y, pct, label):
+                col = OK if pct < 60 else ("#f59e0b" if pct < 85 else ERR)
+                c.create_text(0, y + 4, text=label, anchor="w", fill=MUTED, font=(self._font[0], 8))
+                c.create_rectangle(42, y, 168, y + 8, fill=PANEL, outline=BORDER)
+                c.create_rectangle(42, y, 42 + 126 * min(pct, 100) / 100, y + 8, fill=col, outline="")
+            bar(1, util, "GPU")
+            bar(12, mem, "VRAM")
+            txt = f"{g['name'].replace('NVIDIA GeForce ', '')}  {util:.0f}%"
+            if g.get("mem_total"):
+                txt += f" · {g['mem_used'] / 1024:.1f}/{g['mem_total'] / 1024:.0f} GB"
+            if g.get("temp") is not None:
+                txt += f" · {g['temp']:.0f}°C"
+            if g.get("power") is not None:
+                txt += f" · {g['power']:.0f} W"
+            self.gpu_label.configure(text=txt)
+        if models:
+            parts = []
+            for m in models:
+                where = f"{m['vram_gb']:.1f} GB VRAM" + (f" + {m['ram_gb']:.1f} GB RAM" if m["ram_gb"] > 0.2 else "")
+                parts.append(f"{m['name']} ({where})")
+            self.model_label.configure(text="W pamięci: " + ", ".join(parts))
+        elif (self.lai_status or {}).get("backend") == "ollama":
+            self.model_label.configure(text="W pamięci: żaden model (wczyta się przy pierwszym użyciu)")
+        else:
+            self.model_label.configure(text="")
+        self._show_activity()
+
+    def _set_activity(self, key, text=None):
+        if text:
+            self._activity[key] = text
+        else:
+            self._activity.pop(key, None)
+        self._show_activity()
+
+    def _show_activity(self):
+        self.activity_label.configure(text=("🧠 " + " · ".join(self._activity.values())) if self._activity else "")
+
     def _update_ai_label(self):
         st = self.lai_status or {}
         if not st or not self.cfg.local_ai.enabled:
@@ -1370,11 +1442,15 @@ class App:
         run = self._ai_run
         hits = list(self.all_hits[:200])
         by_key = {id(h): h for h in hits}
+        done_keys: set = set()
+        self._set_activity("review", f"oceniam wyniki 0/{len(hits)}")
         items = [{"key": id(h), "text": h.text, "chat": h.chat_name, "sender": h.sender_name or ""} for h in hits]
 
         def apply(partial):
             if run != self._ai_run:
                 return
+            done_keys.update(partial.keys())
+            self._set_activity("review", f"oceniam wyniki {len(done_keys)}/{len(hits)}")
             for k, v in partial.items():
                 h = by_key.get(k)
                 if h is None:
@@ -1390,9 +1466,10 @@ class App:
 
         def done(_):
             if run == self._ai_run:
+                self._set_activity("review")
                 self._render_list()
 
-        self.bg.run(work, done, lambda e: (log_error(e), self._render_list()))
+        self.bg.run(work, done, lambda e: (log_error(e), self._set_activity("review"), self._render_list()))
 
     def _show_answer(self):
         if not self.answer_visible:
@@ -1603,11 +1680,13 @@ class App:
         if key in self._translations or getattr(self, "_tr_pending", None) == key:
             return
         self._tr_pending = key
+        self._set_activity("tr", "tłumaczę")
 
         def work():
             return self.lai.translate(h.text)
 
         def done(tr):
+            self._set_activity("tr")
             self._translations[key] = tr
             self._tr_pending = None
             if tr.get("jezyk") and h.verdict is not None:
@@ -1618,6 +1697,7 @@ class App:
 
         def err(e):
             log_error(e)
+            self._set_activity("tr")
             self._translations[key] = {"tlumaczenie": "", "jezyk": ""}
             self._tr_pending = None
 
@@ -1642,11 +1722,13 @@ class App:
             if res is None:
                 self.detail.insert("end", "👁 Lokalne AI sprawdza zdjęcie…\n\n", "meta")
                 checks[path] = "pending"
+                self._set_activity("img", "sprawdzam zdjęcie")
 
                 def work():
                     return self.lai.check_image(path)
 
                 def done(r):
+                    self._set_activity("img")
                     checks[path] = r
                     sel = self.tree.selection()
                     if sel and self.hits[int(sel[0])] is h:
@@ -1654,6 +1736,7 @@ class App:
 
                 def err(e):
                     log_error(e)
+                    self._set_activity("img")
                     checks[path] = {"bezpieczne": False, "opis": "", "blad": friendly_error(e)}
 
                 self.bg.run(work, done, err)

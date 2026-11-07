@@ -28,6 +28,9 @@ class FakeOllama(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/tags":
             self._send({"models": [{"name": m} for m in self.models]})
+        elif self.path == "/api/ps":
+            self._send({"models": [{"name": "qwen3:14b", "size": 10_400_000_000, "size_vram": 9_800_000_000,
+                                    "expires_at": "2026-11-07T20:30:00Z"}]})
         else:
             self._send({}, 404)
 
@@ -179,3 +182,23 @@ def test_pull_without_ollama_installed_gives_clear_error(tmp_path, monkeypatch):
     monkeypatch.setattr(L, "find_ollama_exe", lambda: None)
     with pytest.raises(LocalAiError, match="ollama.com"):
         ai("http://127.0.0.1:9", tmp_path).pull("qwen3-vl:8b")
+
+
+def test_loaded_models(ollama, tmp_path):
+    m = ai(ollama, tmp_path).loaded_models()
+    assert m[0]["name"] == "qwen3:14b" and round(m[0]["vram_gb"], 1) == 9.8 and round(m[0]["ram_gb"], 1) == 0.6
+
+
+def test_gpu_stats_parses_nvidia_smi(monkeypatch):
+    from szperacz import localai as L
+    monkeypatch.setattr(L, "_SMI", "nvidia-smi")
+    monkeypatch.setattr(L.subprocess, "run", lambda *a, **k: type("R", (), {
+        "stdout": "NVIDIA GeForce RTX 5080, 43, 10240, 16303, 61, 212.5\n"})())
+    g = L.gpu_stats()
+    assert g["name"].endswith("5080") and g["util"] == 43 and g["mem_total"] == 16303 and g["temp"] == 61
+
+
+def test_gpu_stats_without_nvidia(monkeypatch):
+    from szperacz import localai as L
+    monkeypatch.setattr(L, "_SMI", "")
+    assert L.gpu_stats() is None

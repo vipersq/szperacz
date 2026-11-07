@@ -51,6 +51,48 @@ def find_ollama_exe() -> str | None:
     return None
 
 
+def find_nvidia_smi() -> str | None:
+    exe = shutil.which("nvidia-smi")
+    if exe:
+        return exe
+    for p in (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "nvidia-smi.exe",
+              Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe"):
+        if p.exists():
+            return str(p)
+    return None
+
+
+_SMI = None
+
+
+def gpu_stats() -> dict | None:
+    """Obciążenie karty NVIDIA: {"name","util","mem_used","mem_total","temp","power"} (MB, %, °C, W)."""
+    global _SMI
+    if _SMI is None:
+        _SMI = find_nvidia_smi() or ""
+    if not _SMI:
+        return None
+    kw = {"capture_output": True, "text": True, "timeout": 4}
+    if sys.platform.startswith("win"):
+        kw["creationflags"] = 0x08000000   # bez migającego okna konsoli
+    try:
+        out = subprocess.run([_SMI, "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+                              "--format=csv,noheader,nounits"], **kw).stdout.strip().splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out:
+        return None
+    parts = [x.strip() for x in out[0].split(",")]
+
+    def num(i):
+        try:
+            return float(parts[i])
+        except (IndexError, ValueError):
+            return None
+    return {"name": parts[0] if parts else "GPU", "util": num(1), "mem_used": num(2), "mem_total": num(3),
+            "temp": num(4), "power": num(5)}
+
+
 def _is_local(url: str) -> bool:
     return bool(re.match(r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?", url or ""))
 
@@ -148,6 +190,19 @@ class LocalAI:
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    def loaded_models(self) -> list[dict]:
+        """Modele, które Ollama trzyma teraz w pamięci: [{"name","vram_gb","ram_gb","until"}]."""
+        try:
+            ps = _http(self.cfg.ollama_url + "/api/ps", timeout=2)
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for m in ps.get("models", []):
+            size, vram = m.get("size") or 0, m.get("size_vram") or 0
+            out.append({"name": m.get("name") or m.get("model"), "vram_gb": vram / 1e9,
+                        "ram_gb": max(0, size - vram) / 1e9, "until": m.get("expires_at")})
+        return out
 
     def ensure_running(self, wait=20.0, log=None) -> bool:
         """Jeśli Ollama nie działa, a jest zainstalowana na tym komputerze — uruchamia
