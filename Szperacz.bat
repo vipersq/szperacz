@@ -5,7 +5,7 @@ rem Z poleceniem dziala w konsoli, np.:  Szperacz.bat szukaj anten*
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-set "DEPS=.venv\szperacz-deps-3.txt"
+set "DEPS=.venv\szperacz-deps-4.txt"
 
 if not exist ".venv\Scripts\szperacz-gui.exe" goto setup
 if not exist "%DEPS%" goto install

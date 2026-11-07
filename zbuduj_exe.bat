@@ -19,6 +19,7 @@ echo.
 echo [1/2] Szperacz.exe (okienko)...
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onefile --windowed ^
     --name Szperacz --collect-submodules telethon --hidden-import qrcode ^
+    --collect-all webview --collect-all clr_loader --hidden-import clr --hidden-import PIL._tkinter_finder ^
     szperacz_gui_start.py || goto fail
 
 echo.

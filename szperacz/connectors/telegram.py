@@ -104,7 +104,7 @@ class TelegramConnector(Connector):
         # automatycznie do 5 min zamiast przerywać synchronizację.
         return TelegramClient(str(self.session_path), self.api_id, self.api_hash,
                               flood_sleep_threshold=300,
-                              device_model="Szperacz", app_version="1.0")
+                              device_model="Szperacz", app_version="1.1")
 
     async def login(self, phone_cb=None, code_cb=None, password_cb=None, log=None) -> str:
         """Logowanie krok po kroku, z informacją, GDZIE Telegram wysłał kod.
@@ -314,6 +314,45 @@ class TelegramConnector(Connector):
             if msg:
                 yield msg
 
+    # ------------------------------------------------------- media do podglądu
+    async def fetch_media(self, chat_id: str, msg_id: int, dest_dir) -> dict:
+        """Pobiera wiadomość i jej zdjęcie/miniaturę (do podglądu). Wynik w cache dest_dir.
+
+        Zwraca {"path": plik albo None, "media": rodzaj, "extra": {...}, "text": pełny tekst}.
+        """
+        from pathlib import Path
+
+        from telethon.tl import types
+
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        safe = str(chat_id).replace("-", "m")
+        target = dest_dir / f"{safe}_{msg_id}.jpg"
+        entity = await self.client.get_entity(int(chat_id))
+        m = await self.client.get_messages(entity, ids=int(msg_id))
+        if m is None:
+            return {"path": None, "media": None, "extra": None, "text": None}
+        kind, extra = media_info(m.media)
+        path = None
+        if target.exists():
+            path = str(target)
+        elif kind in ("photo", "webpage", "video", "gif", "document", "sticker"):
+            try:
+                if kind == "photo":
+                    path = await self.client.download_media(m, file=str(target))
+                elif kind == "webpage":
+                    wp = m.media.webpage
+                    if isinstance(wp, types.WebPage) and wp.photo:
+                        path = await self.client.download_media(wp.photo, file=str(target))
+                else:   # wideo, GIF, pliki, naklejki: największa miniatura (jeśli jest)
+                    doc = m.media.document
+                    if getattr(doc, "thumbs", None):
+                        path = await self.client.download_media(m, file=str(target), thumb=-1)
+            except Exception:  # noqa: BLE001 — brak zdjęcia nie psuje podglądu
+                path = None
+        return {"path": str(path) if path else None, "media": kind, "extra": extra,
+                "text": m.message or ""}
+
     # ------------------------------------------------------ cały Telegram
     async def global_search(self, query: str, *, posts: bool = True, discover: bool = True,
                             mine: bool = True, watched: list[str] | None = None,
@@ -440,6 +479,11 @@ class TelegramConnector(Connector):
             if ch is None or not isinstance(m, types.Message):
                 continue
             text = m.message or ""
+            kind, extra = media_info(getattr(m, "media", None))
+            if not text and kind == "webpage":
+                text = _media_text(kind, extra)
+            if not text and kind == "photo":
+                text = "[zdjęcie]"
             if not text:
                 continue
             sender = None
@@ -450,7 +494,7 @@ class TelegramConnector(Connector):
                         chat_name=utils.get_display_name(ch), chat_type="kanał",
                         msg_id=m.id, date=m.date, text=text,
                         sender_name=sender or utils.get_display_name(ch),
-                        link=_link(ch, m.id)), "wszystkie publiczne")
+                        link=_link(ch, m.id), media=kind or "", extra=extra), "wszystkie publiczne")
             n += 1
         res.notes.insert(0, f"Publiczne kanały: {n} postów." + (
             f" Darmowych wyszukiwań na dziś: {res.flood.remains}/{res.flood.total_daily}."
@@ -493,6 +537,76 @@ def _flood_note(fl) -> str:
     return f"Wykorzystano dzienny limit darmowych wyszukiwań w publicznych kanałach ({fl.total_daily}).{when}{price}"
 
 
+def media_info(media) -> tuple[str | None, dict | None]:
+    """Rodzaj mediów + dodatkowe dane (pełny opis podglądu linku, nazwa pliku, ankieta…)."""
+    from telethon.tl import types
+
+    if media is None or isinstance(media, types.MessageMediaEmpty):
+        return None, None
+    if isinstance(media, types.MessageMediaPhoto):
+        return "photo", None
+    if isinstance(media, types.MessageMediaWebPage):
+        wp = media.webpage
+        if isinstance(wp, types.WebPage):
+            extra = {k: v for k, v in {
+                "site": wp.site_name, "title": wp.title, "description": wp.description,
+                "url": wp.url, "author": getattr(wp, "author", None),
+                "has_photo": bool(wp.photo or wp.document),
+            }.items() if v}
+            return "webpage", extra or None
+        return "webpage", {"url": getattr(wp, "url", None)} if getattr(wp, "url", None) else None
+    if isinstance(media, types.MessageMediaDocument):
+        doc = media.document
+        kind, extra = "document", {}
+        for a in getattr(doc, "attributes", []) or []:
+            if isinstance(a, types.DocumentAttributeFilename):
+                extra["file"] = a.file_name
+            elif isinstance(a, types.DocumentAttributeVideo):
+                kind = "video" if not getattr(a, "round_message", False) else "video"
+                extra["duration"] = int(a.duration or 0)
+            elif isinstance(a, types.DocumentAttributeAudio):
+                kind = "voice" if a.voice else "audio"
+                extra["duration"] = int(a.duration or 0)
+                if a.title:
+                    extra["title"] = a.title
+                if a.performer:
+                    extra["performer"] = a.performer
+            elif isinstance(a, types.DocumentAttributeSticker):
+                kind = "sticker"
+                if a.alt:
+                    extra["emoji"] = a.alt
+            elif isinstance(a, types.DocumentAttributeAnimated):
+                kind = "gif"
+        if getattr(doc, "size", None):
+            extra["size"] = int(doc.size)
+        return kind, extra or None
+    if isinstance(media, types.MessageMediaPoll):
+        poll = media.poll
+        q = getattr(poll.question, "text", poll.question)
+        opts = [getattr(a.text, "text", a.text) for a in poll.answers]
+        return "poll", {"question": q, "options": opts}
+    if isinstance(media, (types.MessageMediaGeo, types.MessageMediaVenue, types.MessageMediaGeoLive)):
+        g = media.geo
+        extra = {"lat": getattr(g, "lat", None), "lon": getattr(g, "long", None)}
+        if isinstance(media, types.MessageMediaVenue):
+            extra["title"], extra["address"] = media.title, media.address
+        return "geo", extra
+    return type(media).__name__.replace("MessageMedia", "").lower(), None
+
+
+def _media_text(kind, extra) -> str:
+    """Tekst przeszukiwalny z mediów (ankieta, plik, tytuł linku)."""
+    if not extra:
+        return ""
+    if kind == "poll":
+        return "📊 " + extra.get("question", "") + " — " + " / ".join(extra.get("options", []))
+    if kind == "webpage":
+        return " ".join(x for x in (extra.get("title"), extra.get("description")) if x)
+    if kind == "geo" and extra.get("title"):
+        return f"📍 {extra['title']} {extra.get('address') or ''}"
+    return ""
+
+
 def _convert(m, chat_id: str, chat_name: str, chat_type: str | None, entity) -> Message | None:
     """Wiadomość Telethona -> nasz Message (None dla serwisowych/pustych)."""
     from telethon import utils
@@ -500,14 +614,17 @@ def _convert(m, chat_id: str, chat_name: str, chat_type: str | None, entity) -> 
     if getattr(m, "action", None):        # wiadomości serwisowe (dołączył, zmienił nazwę…)
         return None
     text = m.message or ""
-    fname = None
-    try:
-        if m.file is not None:
-            fname = m.file.name
-    except Exception:  # noqa: BLE001
-        fname = None
-    if fname:
-        text = f"{text} [plik: {fname}]".strip()
+    kind, extra = media_info(getattr(m, "media", None))
+    if extra and extra.get("file") and kind == "document":
+        text = f"{text} [plik: {extra['file']}]".strip()
+    mt = _media_text(kind, extra)
+    if mt and kind != "webpage":
+        text = f"{text}\n{mt}".strip()
+    if not text and kind == "webpage" and mt:
+        text = mt
+    if not text and kind in ("photo", "video", "gif", "audio", "voice"):
+        text = {"photo": "[zdjęcie]", "video": "[wideo]", "gif": "[GIF]",
+                "audio": "[audio]", "voice": "[wiadomość głosowa]"}[kind]
     if not text:
         return None
     sender = m.sender
@@ -522,4 +639,5 @@ def _convert(m, chat_id: str, chat_name: str, chat_type: str | None, entity) -> 
         msg_id=m.id, date=m.date, text=text,
         sender_id=str(m.sender_id) if m.sender_id is not None else None,
         sender_name=sender_name, link=_link(entity, m.id),
+        media=kind or "", extra=extra, is_out=bool(getattr(m, "out", False)),
     )

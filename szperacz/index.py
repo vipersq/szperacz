@@ -13,6 +13,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+import json
+
 from .models import Hit, Message, Query
 
 SCHEMA = """
@@ -151,6 +153,13 @@ def make_snippet(text: str, groups: list[list[str]], width: int = 160, lead: int
     return ("…" if start > 0 else "") + "".join(out) + ("…" if end < len(flat) else "")
 
 
+def _loads(s):
+    try:
+        return json.loads(s) if s else None
+    except ValueError:
+        return None
+
+
 def _iso(d: datetime) -> str:
     if d.tzinfo is None:
         d = d.replace(tzinfo=timezone.utc)
@@ -167,29 +176,52 @@ class Index:
         self.db.create_function("fold", 1, fold, deterministic=True)
         self.db.create_function("fold_l", 1, fold_l, deterministic=True)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Dodaje kolumny z nowszych wersji do istniejącej bazy (dane zostają)."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(messages)")}
+        for name, decl in (("media", "TEXT"), ("extra", "TEXT"), ("is_out", "INTEGER DEFAULT 0")):
+            if name not in cols:
+                self.db.execute(f"ALTER TABLE messages ADD COLUMN {name} {decl}")
+        self.db.commit()
 
     # ------------------------------------------------------------------ zapis
     def add(self, msgs: Iterable[Message]) -> int:
         rows = [(
             m.source, m.chat_id, m.chat_name, m.chat_type, m.msg_id, _iso(m.date),
             m.sender_id, m.sender_name, m.text, m.link,
+            m.media, json.dumps(m.extra, ensure_ascii=False) if m.extra else None, int(bool(m.is_out)),
         ) for m in msgs]
         if not rows:
             return 0
         self.db.executemany("""
             INSERT INTO messages (source, chat_id, chat_name, chat_type, msg_id, date,
-                                  sender_id, sender_name, text, link)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+                                  sender_id, sender_name, text, link, media, extra, is_out)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(source, chat_id, msg_id) DO UPDATE SET
                 text=excluded.text, sender_name=excluded.sender_name,
-                chat_name=excluded.chat_name, link=excluded.link
+                chat_name=excluded.chat_name, link=excluded.link,
+                media=COALESCE(excluded.media, messages.media),
+                extra=COALESCE(excluded.extra, messages.extra)
             WHERE messages.text IS NOT excluded.text
                OR messages.sender_name IS NOT excluded.sender_name
                OR messages.chat_name IS NOT excluded.chat_name
+               OR messages.media IS NOT excluded.media
+               OR messages.extra IS NOT excluded.extra
         """, rows)
         self.db.commit()
         return len(rows)
+
+    def update_media(self, source: str, chat_id: str, msg_id: int, media: str | None,
+                     extra: dict | None) -> None:
+        """Uzupełnia typ mediów starszych wiadomości (z wersji sprzed 1.1) po podglądzie."""
+        self.db.execute("UPDATE messages SET media=?, extra=? WHERE source=? AND chat_id=? AND msg_id=?",
+                        (media or "", json.dumps(extra, ensure_ascii=False) if extra else None,
+                         source, chat_id, int(msg_id)))
+        self.db.commit()
 
     def get_last_id(self, source: str, chat_id: str) -> int:
         r = self.db.execute("SELECT last_msg_id FROM sync_state WHERE source=? AND chat_id=?",
@@ -227,23 +259,54 @@ class Index:
             nxt = date.fromisoformat(q.date_to[:10]) + timedelta(days=1)
             where.append("m.date < ?")
             params.append(nxt.isoformat())
+        if q.hour_from is not None or q.hour_to is not None:
+            hf = 0 if q.hour_from is None else int(q.hour_from)
+            ht = 23 if q.hour_to is None else int(q.hour_to)
+            hour = "CAST(strftime('%H', m.date, 'localtime') AS INTEGER)"
+            if hf <= ht:
+                where.append(f"{hour} BETWEEN ? AND ?")
+            else:  # przez północ, np. 22–6
+                where.append(f"({hour} >= ? OR {hour} <= ?)")
+            params += [hf, ht]
+        if q.chat_types:
+            where.append("(" + " OR ".join("m.chat_type LIKE ?" for _ in q.chat_types) + ")")
+            params += [f"{t}%" for t in q.chat_types]
+        if q.content:
+            conds = []
+            for c in q.content:
+                if c == "link":
+                    conds.append("(m.media = 'webpage' OR m.text LIKE '%http%' OR m.text LIKE '%t.me/%')")
+                elif c == "text":
+                    conds.append("(m.media IS NULL OR m.media IN ('', 'webpage'))")
+                elif c == "video":
+                    conds.append("m.media IN ('video', 'gif')")
+                elif c == "audio":
+                    conds.append("m.media IN ('audio', 'voice')")
+                else:
+                    conds.append("m.media = ?")
+                    params.append(c)
+            where.append("(" + " OR ".join(conds) + ")")
+        if q.direction == "out":
+            where.append("m.is_out = 1")
+        elif q.direction == "in":
+            where.append("COALESCE(m.is_out, 0) = 0")
 
         if fts:
             sql = """
                 SELECT m.id, m.source, m.chat_name, m.chat_type, m.sender_name, m.date,
-                       m.text, m.link
+                       m.text, m.link, m.chat_id, m.msg_id, m.media, m.extra, m.is_out
                 FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
                 WHERE messages_fts MATCH ?
             """
             params = [fts] + params
-            order = "bm25(messages_fts, 10.0, 2.0, 1.0)" if q.order == "rank" else "m.date DESC"
+            order = {"rank": "bm25(messages_fts, 10.0, 2.0, 1.0)", "oldest": "m.date ASC"}.get(q.order, "m.date DESC")
         else:
             sql = """
                 SELECT m.id, m.source, m.chat_name, m.chat_type, m.sender_name, m.date,
-                       m.text, m.link
+                       m.text, m.link, m.chat_id, m.msg_id, m.media, m.extra, m.is_out
                 FROM messages m WHERE 1=1
             """
-            order = "m.date DESC"
+            order = "m.date ASC" if q.order == "oldest" else "m.date DESC"
         if where:
             sql += " AND " + " AND ".join(where)
         sql += f" ORDER BY {order} LIMIT ?"
@@ -254,7 +317,8 @@ class Index:
                     chat_type=r["chat_type"], sender_name=r["sender_name"],
                     date=r["date"], text=r["text"],
                     snippet=make_snippet(r["text"], q.keyword_groups),
-                    link=r["link"]) for r in rows]
+                    link=r["link"], chat_id=r["chat_id"], msg_id=r["msg_id"], media=r["media"],
+                    extra=_loads(r["extra"]), is_out=bool(r["is_out"])) for r in rows]
 
     def stats(self) -> dict:
         total = self.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]

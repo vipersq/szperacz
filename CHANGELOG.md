@@ -1,5 +1,24 @@
 # Historia zmian
 
+## v1.1.0 — 2026-11-07
+
+#### Nowe
+- **Zdjęcia w podglądzie**: zdjęcia, miniatury wideo, plików i naklejek pobierane na żądanie (cache `dane/media`).
+- **Pełne opisy podglądów linków**: strona, tytuł, cały opis i adres. Klikalne linki w treści wiadomości.
+- **Filtry**: okres (dziś, wczoraj, 7/30 dni, ten/poprzedni miesiąc, 3 miesiące, ten/poprzedni rok),
+  pora dnia (także „przez północ”, np. 22–5), rodzaj czatu, zawartość (tekst, zdjęcia, wideo, pliki, linki,
+  audio, ankiety, lokalizacje), moje / od innych, sortowanie (trafność / najnowsze / najstarsze), limit.
+  Działają w oknie, w konsoli (`--tresc`, `--typ`, `--godz`, `--moje`, `--najstarsze`) i w trybie Cały Telegram.
+- **Wbudowana przeglądarka** (pywebview, Edge WebView2): jedno okno dla wszystkich linków, menu nawigacji,
+  zapamiętane logowania, publiczne posty w pełnym podglądzie, prywatne w aplikacji Telegram.
+- Ikony rodzaju treści na liście wyników (📷 🎬 📎 🔗 📊 📍).
+- Ankiety i lokalizacje są przeszukiwalne (pytanie i odpowiedzi, nazwa miejsca).
+
+#### Zmiany
+- Indeks zapisuje rodzaj mediów, opis linku i to, czy wiadomość jest Twoja. Istniejąca baza jest
+  uzupełniana automatycznie, a starsze wiadomości dostają te dane przy pierwszym podglądzie.
+- `Szperacz.bat` sam doinstaluje nowe biblioteki (Pillow, pywebview).
+
 ## v1.0.0 — 2026-11-07 — pierwsze wydanie
 
 Wyszukiwarka wiadomości z Telegrama z pytaniami po ludzku. Program **tylko czyta**: niczego nie wysyła, nie edytuje i nie usuwa.

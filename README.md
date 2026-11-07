@@ -18,9 +18,19 @@ Kolejne komunikatory dochodzą jako osobne konektory.
 - **🌐 Cały Telegram**: szukanie na żywo na serwerach Telegrama, także w publicznych kanałach i grupach,
   do których nie należysz.
 - **＋ Obserwuj**: dowolny publiczny kanał trafia do indeksu bez dołączania.
+- **Podgląd ze zdjęciami**: zdjęcia, miniatury wideo i plików oraz pełne opisy podglądów linków
+  (tytuł, strona, cały opis). Klikalne linki w treści.
+- **Filtry**: okres (dziś, wczoraj, 7/30 dni, miesiąc, rok…), pora dnia, rodzaj czatu, zawartość
+  (zdjęcia, wideo, pliki, linki, audio, ankiety, lokalizacje), moje lub cudze wiadomości, sortowanie.
+- **🌐 Wbudowana przeglądarka** (silnik Edge WebView2): linki otwierają się w Szperaczu, a publiczne
+  posty w pełnym podglądzie ze zdjęciami. Logowania na stronach są zapamiętywane.
 - **Logowanie kodem QR**: skanujesz telefonem, kod SMS niepotrzebny.
 - **Tylko odczyt**: program niczego nie wysyła, nie edytuje i nie usuwa.
 - Okno (Tkinter, ciemny motyw), wiersz poleceń i gotowe exe dla Windows.
+
+| Filtry i zdjęcia w podglądzie | Pełny opis podglądu linku |
+|---|---|
+| ![Filtry i zdjęcie](docs/filtry-zdjecie.png) | ![Podgląd linku](docs/podglad-linku.png) |
 
 | Cały Telegram | Logowanie QR |
 |---|---|
@@ -55,6 +65,14 @@ w `config.toml` i `dane/`, które są w `.gitignore`.
 - **Czaty…**: lista czatów; zaznacz kilka i zsynchronizuj tylko je.
 - **🌐 Cały Telegram**: szukanie na żywo na serwerach Telegrama, także tam, gdzie Cię nie ma (opis niżej).
 - **＋ Obserwuj @kanał** przy wyniku z publicznego kanału: kanał trafia do indeksu bez dołączania.
+- **Filtry ▾** rozwija panel: pora dnia (rano, wieczór, noc, godziny pracy, własne), rodzaj czatu,
+  zawartość, „moje / od innych”, sortowanie (trafność, najnowsze, najstarsze), limit wyników.
+  Filtry działają we wszystkich trybach, także w 🌐 Całym Telegramie.
+- Podgląd wiadomości pokazuje zdjęcie, a dla linków pełny opis strony. Zdjęcia są pobierane
+  na żądanie i zapisywane w `dane/media`, więc drugi raz otwierają się od razu, także offline.
+- **🌐 Przeglądarka** w nagłówku otwiera Telegram Web. Linki z wiadomości otwierają się w tym
+  samym oknie. Prywatne grupy (linki `t.me/c/…`) otwierają się w aplikacji Telegram, bo w sieci
+  nie mają podglądu. W menu przeglądarki: Wstecz, Dalej, Odśwież, Wpisz adres, Otwórz w aplikacji Telegram.
 - Skróty: Enter = szukaj, Ctrl+F = pole wyszukiwania, Esc = wyczyść pole.
 
 ### Exe
@@ -109,6 +127,8 @@ szperacz szukaj anten* 40m
 szperacz szukaj przekaznik --czat sadars --od 2026-10-01 --najnowsze
 szperacz szukaj --nadawca marek -n 50
 szperacz szukaj --fts "anten* NOT tuner"
+szperacz szukaj anten* --tresc photo --typ grupa --godz 18-23 --najstarsze
+szperacz szukaj --moje --od 2026-11-01
 
 # pytanie po ludzku (Claude)
 set ANTHROPIC_API_KEY=sk-ant-...
@@ -174,6 +194,7 @@ szperacz/
   ai.py                Claude: prompt → zapytanie, wyniki → odpowiedź
   service.py           logika wspólna dla okna i konsoli
   gui.py               okno (Tkinter)
+  browser.py           wbudowana przeglądarka (pywebview / Edge WebView2, osobny proces)
   cli.py               polecenia
 tests/                 testy (pytest), bez sieci: udawany Telegram i udawany Claude
 docs/                  zrzuty ekranu
@@ -192,5 +213,7 @@ Indeks i wyszukiwarka zostają bez zmian.
 ## Ograniczenia etapu 1
 - Edycje starszych wiadomości nie są wykrywane (dociągane są tylko nowe).
   Pełne odświeżenie czatu: usuń jego wpis z `sync_state` albo cały indeks.
-- Pliki i zdjęcia są indeksowane tylko po podpisie i nazwie pliku, bez zawartości.
+- Pliki i zdjęcia są przeszukiwane po podpisie i nazwie pliku, bez zawartości (zdjęcia widać w podglądzie).
+- Wbudowana przeglądarka wymaga Microsoft Edge WebView2. W Windows 10/11 zwykle jest zainstalowany.
+  Jeśli go brakuje, linki otwierają się w zwykłej przeglądarce.
 - Czaty tajne (secret chats) nie są dostępne przez API: istnieją tylko na telefonie.

@@ -18,7 +18,9 @@ from tkinter import messagebox, ttk
 from . import config as cfgmod
 from . import service
 from .index import Index, _clean_term, fold, make_snippet
-from .models import Hit, Query
+from . import browser
+from .browser import telegram_app_link
+from .models import MEDIA_LABELS, Hit, Query
 
 # ------------------------------------------------------------------ kolory
 BG = "#14171c"
@@ -35,6 +37,59 @@ OK = "#5fd38d"
 
 
 UI_FONT_BIG = None   # ustawiane w App._setup_style
+
+URL_RE = re.compile(r"(?:https?://|www\.|t\.me/)[^\s<>«»\"']+")
+
+PERIODS = ["dowolny", "dziś", "wczoraj", "ostatnie 7 dni", "ostatnie 30 dni", "ten miesiąc",
+           "poprzedni miesiąc", "ostatnie 3 miesiące", "ten rok", "poprzedni rok"]
+HOURS = ["dowolna", "rano (6–11)", "popołudnie (12–17)", "wieczór (18–21)", "noc (22–5)",
+         "godziny pracy (8–17)", "własne"]
+HOUR_RANGES = {"rano (6–11)": (6, 11), "popołudnie (12–17)": (12, 17), "wieczór (18–21)": (18, 21),
+               "noc (22–5)": (22, 5), "godziny pracy (8–17)": (8, 17)}
+CHAT_TYPES = [("prywatny", "prywatne"), ("grupa", "grupy"), ("kanał", "kanały"), ("bot", "boty")]
+CONTENT_TYPES = [("text", "sam tekst"), ("photo", "📷 zdjęcia"), ("video", "🎬 wideo"),
+                 ("document", "📎 pliki"), ("link", "🔗 linki"), ("audio", "🎵 audio / głosowe"),
+                 ("poll", "📊 ankiety"), ("geo", "📍 lokalizacje")]
+ORDERS = [("rank", "trafność"), ("date", "najnowsze"), ("oldest", "najstarsze")]
+
+
+def period_range(name: str, today: date | None = None) -> tuple[str | None, str | None]:
+    """Zakres dat (RRRR-MM-DD) dla nazwy okresu z listy PERIODS."""
+    from datetime import timedelta
+    t = today or date.today()
+    first = t.replace(day=1)
+    if name == "dziś":
+        return t.isoformat(), t.isoformat()
+    if name == "wczoraj":
+        y = t - timedelta(days=1)
+        return y.isoformat(), y.isoformat()
+    if name == "ostatnie 7 dni":
+        return (t - timedelta(days=6)).isoformat(), t.isoformat()
+    if name == "ostatnie 30 dni":
+        return (t - timedelta(days=29)).isoformat(), t.isoformat()
+    if name == "ten miesiąc":
+        return first.isoformat(), t.isoformat()
+    if name == "poprzedni miesiąc":
+        last = first - timedelta(days=1)
+        return last.replace(day=1).isoformat(), last.isoformat()
+    if name == "ostatnie 3 miesiące":
+        m, y = t.month - 3, t.year
+        if m <= 0:
+            m, y = m + 12, y - 1
+        return date(y, m, min(t.day, 28)).isoformat(), t.isoformat()
+    if name == "ten rok":
+        return date(t.year, 1, 1).isoformat(), t.isoformat()
+    if name == "poprzedni rok":
+        return date(t.year - 1, 1, 1).isoformat(), date(t.year - 1, 12, 31).isoformat()
+    return None, None
+
+
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n} B"
 
 
 def log_error(e: BaseException) -> None:
@@ -608,6 +663,11 @@ class App:
         s.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", FG)])
         s.configure("TCheckbutton", background=BG, foreground=FG, indicatorbackground=FIELD)
         s.map("TCheckbutton", background=[("active", BG)], indicatorbackground=[("selected", ACCENT_DIM)])
+        s.configure("Panel.TCheckbutton", background=PANEL, foreground=FG, indicatorbackground=FIELD)
+        s.map("Panel.TCheckbutton", background=[("active", PANEL)], indicatorbackground=[("selected", ACCENT_DIM)])
+        s.configure("Panel.TRadiobutton", background=PANEL, foreground=FG, indicatorbackground=FIELD)
+        s.map("Panel.TRadiobutton", background=[("active", PANEL)], indicatorbackground=[("selected", ACCENT_DIM)])
+        s.configure("TSpinbox", arrowcolor=FG, padding=3)
         s.configure("Mode.TRadiobutton", background=FIELD, foreground=MUTED, padding=(12, 7),
                     indicatorsize=0, borderwidth=1)
         s.map("Mode.TRadiobutton", background=[("selected", ACCENT_DIM), ("active", BORDER)],
@@ -638,7 +698,9 @@ class App:
         head.pack(fill="x")
         ttk.Label(head, text="◉ SZPERACZ", style="Logo.TLabel").pack(side="left")
         ttk.Label(head, text="  wszystkie Twoje rozmowy w jednym miejscu", style="Muted.TLabel").pack(side="left", pady=(4, 0))
-        for text, cmd in (("Ustawienia", self.open_settings), ("Czaty…", self.open_chats),
+        for text, cmd in (("Ustawienia", self.open_settings),
+                          ("🌐 Przeglądarka", lambda: browser.open_url(browser.HOME_URL, self.cfg.data_dir, self._browser_failed)),
+                          ("Czaty…", self.open_chats),
                           ("⟳ Synchronizuj", self.start_sync), ("Zaloguj", self.login)):
             ttk.Button(head, text=text, command=cmd).pack(side="right", padx=(6, 0))
 
@@ -667,20 +729,77 @@ class App:
         flt.pack(fill="x", pady=(10, 0))
         self.chat_var, self.sender_var = tk.StringVar(), tk.StringVar()
         self.from_var, self.to_var = tk.StringVar(), tk.StringVar()
-        self.newest = tk.BooleanVar()
         ttk.Label(flt, text="Czat").pack(side="left")
-        self.chat_cb = ttk.Combobox(flt, textvariable=self.chat_var, width=26)
-        self.chat_cb.pack(side="left", padx=(6, 14))
+        self.chat_cb = ttk.Combobox(flt, textvariable=self.chat_var, width=24)
+        self.chat_cb.pack(side="left", padx=(6, 12))
         ttk.Label(flt, text="Nadawca").pack(side="left")
-        self.sender_cb = ttk.Combobox(flt, textvariable=self.sender_var, width=20)
-        self.sender_cb.pack(side="left", padx=(6, 14))
-        ttk.Label(flt, text="Od").pack(side="left")
-        ttk.Entry(flt, textvariable=self.from_var, width=11).pack(side="left", padx=(6, 8))
-        ttk.Label(flt, text="Do").pack(side="left")
-        ttk.Entry(flt, textvariable=self.to_var, width=11).pack(side="left", padx=(6, 14))
-        ttk.Checkbutton(flt, text="Od najnowszych", variable=self.newest).pack(side="left")
-        ttk.Button(flt, text="Wyczyść", command=self.clear_filters).pack(side="right")
+        self.sender_cb = ttk.Combobox(flt, textvariable=self.sender_var, width=18)
+        self.sender_cb.pack(side="left", padx=(6, 12))
+        ttk.Label(flt, text="Okres").pack(side="left")
+        self.period_var = tk.StringVar(value=PERIODS[0])
+        per = ttk.Combobox(flt, textvariable=self.period_var, values=PERIODS, width=16, state="readonly")
+        per.pack(side="left", padx=(6, 8))
+        per.bind("<<ComboboxSelected>>", lambda *_: self._period_changed())
+        ttk.Label(flt, text="od").pack(side="left")
+        ttk.Entry(flt, textvariable=self.from_var, width=11).pack(side="left", padx=(4, 6))
+        ttk.Label(flt, text="do").pack(side="left")
+        ttk.Entry(flt, textvariable=self.to_var, width=11).pack(side="left", padx=(4, 12))
+        self.more_btn = ttk.Button(flt, text="Filtry ▾", width=11, command=self._toggle_more)
+        self.more_btn.pack(side="right")
+        ttk.Button(flt, text="Wyczyść", command=self.clear_filters).pack(side="right", padx=(0, 6))
         self.flt_frame = flt
+
+        # panel „więcej filtrów”
+        more = ttk.Frame(top, style="Panel.TFrame", padding=(14, 10))
+        self.more_frame, self.more_visible = more, False
+        self.hour_var = tk.StringVar(value=HOURS[0])
+        self.hf_var, self.ht_var = tk.StringVar(value="0"), tk.StringVar(value="23")
+        self.type_vars = {k: tk.BooleanVar() for k, _ in CHAT_TYPES}
+        self.content_vars = {k: tk.BooleanVar() for k, _ in CONTENT_TYPES}
+        self.dir_var = tk.StringVar(value="")
+        self.order_var = tk.StringVar(value=ORDERS[0][1])
+        self.limit_var = tk.StringVar(value="300")
+
+        def lab(row, col, text):
+            ttk.Label(more, text=text, style="PanelMuted.TLabel").grid(row=row, column=col, sticky="w", padx=(0, 8), pady=3)
+
+        lab(0, 0, "Pora dnia")
+        hrow = ttk.Frame(more, style="Panel.TFrame")
+        hrow.grid(row=0, column=1, sticky="w", pady=3)
+        hc = ttk.Combobox(hrow, textvariable=self.hour_var, values=HOURS, width=20, state="readonly")
+        hc.pack(side="left")
+        hc.bind("<<ComboboxSelected>>", lambda *_: self._hours_changed())
+        ttk.Label(hrow, text="  godz.", style="PanelMuted.TLabel").pack(side="left")
+        ttk.Spinbox(hrow, from_=0, to=23, textvariable=self.hf_var, width=4, command=self._hours_custom).pack(side="left", padx=4)
+        ttk.Label(hrow, text="–", style="Panel.TLabel").pack(side="left")
+        ttk.Spinbox(hrow, from_=0, to=23, textvariable=self.ht_var, width=4, command=self._hours_custom).pack(side="left", padx=4)
+
+        lab(0, 2, "Kto")
+        drow = ttk.Frame(more, style="Panel.TFrame")
+        drow.grid(row=0, column=3, sticky="w", pady=3)
+        for val, txt in (("", "wszyscy"), ("out", "moje"), ("in", "od innych")):
+            ttk.Radiobutton(drow, text=txt, value=val, variable=self.dir_var, style="Panel.TRadiobutton").pack(side="left", padx=(0, 10))
+
+        lab(1, 0, "Rodzaj czatu")
+        trow = ttk.Frame(more, style="Panel.TFrame")
+        trow.grid(row=1, column=1, sticky="w", pady=3)
+        for k, txt in CHAT_TYPES:
+            ttk.Checkbutton(trow, text=txt, variable=self.type_vars[k], style="Panel.TCheckbutton").pack(side="left", padx=(0, 10))
+
+        lab(1, 2, "Sortuj")
+        orow = ttk.Frame(more, style="Panel.TFrame")
+        orow.grid(row=1, column=3, sticky="w", pady=3)
+        ttk.Combobox(orow, textvariable=self.order_var, values=[o[1] for o in ORDERS], width=12,
+                     state="readonly").pack(side="left")
+        ttk.Label(orow, text="   limit", style="PanelMuted.TLabel").pack(side="left")
+        ttk.Spinbox(orow, from_=20, to=2000, increment=50, textvariable=self.limit_var, width=6).pack(side="left", padx=6)
+
+        lab(2, 0, "Zawartość")
+        crow = ttk.Frame(more, style="Panel.TFrame")
+        crow.grid(row=2, column=1, columnspan=3, sticky="w", pady=3)
+        for k, txt in CONTENT_TYPES:
+            ttk.Checkbutton(crow, text=txt, variable=self.content_vars[k], style="Panel.TCheckbutton").pack(side="left", padx=(0, 10))
+        more.columnconfigure(1, weight=1)
         # opcje trybu „Cały Telegram” (zamiast filtrów lokalnych)
         g = ttk.Frame(top)
         self.g_posts, self.g_mine = tk.BooleanVar(value=True), tk.BooleanVar(value=True)
@@ -743,7 +862,13 @@ class App:
         self.detail.tag_configure("link", foreground=ACCENT, underline=True, font=self._font)
         self.detail.tag_bind("link", "<Enter>", lambda *_: self.detail.configure(cursor="hand2"))
         self.detail.tag_bind("link", "<Leave>", lambda *_: self.detail.configure(cursor="arrow"))
-        self.detail.tag_bind("link", "<Button-1>", lambda *_: self._open_selected_link())
+        self.detail.tag_configure("url", foreground=ACCENT, underline=True)
+        for t in ("url", "link"):
+            self.detail.tag_bind(t, "<Enter>", lambda *_: self.detail.configure(cursor="hand2"))
+            self.detail.tag_bind(t, "<Leave>", lambda *_: self.detail.configure(cursor="arrow"))
+        self.detail.tag_configure("cardsite", foreground=MUTED, font=(self._font[0], 9, "bold"), lmargin1=12)
+        self.detail.tag_configure("cardtitle", foreground=FG, font=(self._font[0], 12, "bold"), lmargin1=12, lmargin2=12)
+        self.detail.tag_configure("card", foreground="#c3c9d2", lmargin1=12, lmargin2=12, spacing3=4)
         self.detail.tag_configure("follow", foreground=OK, font=self._font)
         self.detail.tag_bind("follow", "<Enter>", lambda *_: self.detail.configure(cursor="hand2"))
         self.detail.tag_bind("follow", "<Leave>", lambda *_: self.detail.configure(cursor="arrow"))
@@ -780,11 +905,9 @@ class App:
     def _mode_changed(self):
         glob = self.mode.get() == "global"
         if glob:
-            self.flt_frame.pack_forget()
-            self.g_frame.pack(fill="x", pady=(10, 0))
+            self.g_frame.pack(fill="x", pady=(8, 0), before=self.flt_frame)
         else:
             self.g_frame.pack_forget()
-            self.flt_frame.pack(fill="x", pady=(10, 0))
         if glob:
             self.hint.configure(text="Na żywo na serwerach Telegrama — także kanały i grupy, do których nie należysz. "
                                      "#hashtag = bez limitu. Wszystkie publiczne kanały naraz wymagają Premium.")
@@ -838,7 +961,48 @@ class App:
     def clear_filters(self):
         for v in (self.chat_var, self.sender_var, self.from_var, self.to_var):
             v.set("")
-        self.newest.set(False)
+        self.period_var.set(PERIODS[0])
+        self.hour_var.set(HOURS[0])
+        self.hf_var.set("0")
+        self.ht_var.set("23")
+        for v in (*self.type_vars.values(), *self.content_vars.values()):
+            v.set(False)
+        self.dir_var.set("")
+        self.order_var.set(ORDERS[0][1])
+        self._update_more_label()
+
+    def _toggle_more(self):
+        if self.more_visible:
+            self.more_frame.pack_forget()
+        else:
+            self.more_frame.pack(fill="x", pady=(8, 0), after=self.flt_frame)
+        self.more_visible = not self.more_visible
+        self._update_more_label()
+
+    def _update_more_label(self):
+        n = (self.hour_var.get() != HOURS[0]) + any(v.get() for v in self.type_vars.values()) \
+            + any(v.get() for v in self.content_vars.values()) + bool(self.dir_var.get()) \
+            + (self.order_var.get() != ORDERS[0][1])
+        arrow = "▴" if self.more_visible else "▾"
+        self.more_btn.configure(text=f"Filtry{f' ({n})' if n else ''} {arrow}")
+
+    def _period_changed(self):
+        a, b = period_range(self.period_var.get())
+        if a is not None or self.period_var.get() == PERIODS[0]:
+            self.from_var.set(a or "")
+            self.to_var.set(b or "")
+
+    def _hours_changed(self):
+        rng = HOUR_RANGES.get(self.hour_var.get())
+        if rng:
+            self.hf_var.set(str(rng[0]))
+            self.ht_var.set(str(rng[1]))
+        elif self.hour_var.get() == HOURS[0]:
+            self.hf_var.set("0")
+            self.ht_var.set("23")
+
+    def _hours_custom(self):
+        self.hour_var.set("własne")
 
     def _filters(self) -> Query | None:
         q = Query()
@@ -855,7 +1019,22 @@ class App:
             q.chats = [self.chat_var.get().strip()]
         if self.sender_var.get().strip():
             q.senders = [self.sender_var.get().strip()]
-        q.order = "date" if self.newest.get() else "rank"
+        if self.hour_var.get() != HOURS[0]:
+            try:
+                q.hour_from = max(0, min(23, int(self.hf_var.get())))
+                q.hour_to = max(0, min(23, int(self.ht_var.get())))
+            except ValueError:
+                messagebox.showerror("Szperacz", "Godziny wpisz jako liczby 0–23.")
+                return None
+        q.chat_types = [k for k, v in self.type_vars.items() if v.get()]
+        q.content = [k for k, v in self.content_vars.items() if v.get()]
+        q.direction = self.dir_var.get() or None
+        q.order = next((k for k, txt in ORDERS if txt == self.order_var.get()), "rank")
+        try:
+            q.limit = max(10, min(5000, int(self.limit_var.get())))
+        except ValueError:
+            q.limit = 300
+        self._update_more_label()
         return q
 
     # ------------------------------------------------------------- szukanie
@@ -866,8 +1045,7 @@ class App:
             return
         if self.mode.get() == "words":
             q.keyword_groups = [[w] for w in text.split()]
-            q.limit = 300
-            if not text and not (q.chats or q.senders or q.date_from or q.date_to):
+            if not text and not q.has_filters():
                 self.qentry.focus_set()
                 return
             r = service.search_words(self.index, q)
@@ -879,7 +1057,7 @@ class App:
             self.qentry.focus_set()
             return
         if self.mode.get() == "global":
-            self.global_search(text)
+            self.global_search(text, filters=q)
             return
         if not self.cfg.ai.api_key:
             if messagebox.askyesno("Zapytaj AI", "Do pytań po ludzku potrzebny jest klucz Claude API.\n"
@@ -899,7 +1077,7 @@ class App:
         self._set_answer([("Myślę…", "muted")])
         self.bg.run(work, self.show_results, self._ai_error)
 
-    def global_search(self, text, allow_paid_stars=None):
+    def global_search(self, text, allow_paid_stars=None, filters=None):
         if not self._need_telegram():
             return
         use_ai = self.g_ai.get() and bool(self.cfg.ai.api_key)
@@ -910,7 +1088,7 @@ class App:
             tg = await self.shared_tg()
             return await service.global_search(
                 cfg, tg, text, use_ai=use_ai, allow_paid_stars=allow_paid_stars,
-                log=lambda m: self.bg.call_ui(self._progress_note, m), **opts)
+                log=lambda m: self.bg.call_ui(self._progress_note, m), filters=filters, **opts)
 
         self._show_answer()
         self._set_answer([("Szukam w Telegramie…", "muted")])
@@ -968,6 +1146,9 @@ class App:
         self.tree.delete(*self.tree.get_children())
         for n, h in enumerate(r.hits, 1):
             snip = make_snippet(h.text, r.query.keyword_groups, width=140, lead=14)
+            icon = MEDIA_LABELS.get(h.media or "")
+            if icon:
+                snip = f"{icon} {snip}"
             self.tree.insert("", "end", iid=str(n - 1), tags=("odd",) if n % 2 == 0 else (),
                              values=(n, local_time(h.date), h.chat_name, h.sender_name or "?", snip))
         info = f"{len(r.hits)} wyników"
@@ -1027,27 +1208,161 @@ class App:
         if not sel:
             return
         h = self.hits[int(sel[0])]
+        self._sel_token = getattr(self, "_sel_token", 0) + 1
+        token = self._sel_token
+        self._render_detail(h, media_state="loading" if self._wants_media(h) else None)
+        if self._wants_media(h):
+            cached = self._media_cache_path(h)
+            if cached.exists():
+                self._render_detail(h, media_state={"path": str(cached), "media": h.media, "extra": h.extra})
+            # krótka zwłoka: przewijanie strzałkami nie zasypuje Telegrama zapytaniami
+            self.root.after(350, lambda: self._load_media(h, token))
+
+    def _wants_media(self, h) -> bool:
+        if h.source != "telegram" or not h.chat_id or not h.msg_id:
+            return False
+        if h.media is None:          # stara wiadomość z indeksu — nie wiemy, czy ma zdjęcie
+            return True
+        return h.media in ("photo", "webpage", "video", "gif", "document", "sticker")
+
+    def _media_cache_path(self, h) -> Path:
+        return self.cfg.data_dir / "media" / f"{str(h.chat_id).replace('-', 'm')}_{h.msg_id}.jpg"
+
+    def _load_media(self, h, token):
+        if token != self._sel_token:
+            return
+        sess = Path(str(self.cfg.telegram_session) + ".session")
+        if not sess.exists():
+            self._render_detail(h, media_state=None)
+            return
+        cfg = self.cfg
+
+        async def work():
+            tg = await self.shared_tg()
+            return await tg.fetch_media(h.chat_id, h.msg_id, cfg.data_dir / "media")
+
+        def done(info):
+            if info.get("media") is None and h.media:    # brak odpowiedzi ≠ brak mediów
+                info = {**info, "media": h.media, "extra": info.get("extra") or h.extra}
+            if info.get("media") != h.media or info.get("extra") != h.extra:
+                h.media, h.extra = info.get("media") or "", info.get("extra") or h.extra
+                if h.row_id and h.row_id > 0:
+                    try:
+                        self.index.update_media(h.source, h.chat_id, h.msg_id, h.media, h.extra)
+                    except Exception:  # noqa: BLE001
+                        pass
+            if token == self._sel_token:
+                self._render_detail(h, media_state=info)
+
+        def err(e):
+            log_error(e)
+            if token == self._sel_token:
+                self._render_detail(h, media_state={"error": friendly_error(e)})
+
+        self.bg.run(work, done, err)
+
+    def _render_detail(self, h, media_state=None):
         d = self.detail
         d.configure(state="normal")
         d.delete("1.0", "end")
-        d.insert("end", (h.sender_name or "?") + "\n", "who")
+        self._detail_links = {}
+        d.insert("end", (h.sender_name or "?") + ("  (ja)" if h.is_out else "") + "\n", "who")
         origin = h.chat_type.split("·", 1)[1].strip() if h.chat_type and "·" in h.chat_type else h.source
-        d.insert("end", f"{h.chat_name}  ·  {local_time(h.date)}  ·  {origin}\n\n", "meta")
+        kind = MEDIA_LABELS.get(h.media or "", "")
+        d.insert("end", f"{h.chat_name}  ·  {local_time(h.date)}  ·  {origin}  {kind}\n\n", "meta")
+
+        # zdjęcie / miniatura
+        if media_state == "loading":
+            d.insert("end", "Ładuję zdjęcie…\n\n", "meta")
+        elif isinstance(media_state, dict):
+            if media_state.get("path"):
+                self._insert_image(media_state["path"])
+            elif media_state.get("error"):
+                d.insert("end", f"(nie udało się pobrać zdjęcia: {media_state['error']})\n\n", "meta")
+
+        # pełna treść z podświetleniem i klikalnymi linkami
         start = d.index("end-1c")
         d.insert("end", h.text)
         for a, b in term_spans(h.text, self.last_groups):
             d.tag_add("hl", f"{start}+{a}c", f"{start}+{b}c")
-        d.insert("end", "\n\n")
+        for m in URL_RE.finditer(h.text):
+            self._tag_link(f"{start}+{m.start()}c", f"{start}+{m.end()}c", m.group().rstrip(".,);:!?"))
+        d.insert("end", "\n")
+
+        # pełny opis podglądu linku / plik / ankieta
+        extra = (media_state.get("extra") if isinstance(media_state, dict) else None) or h.extra or {}
+        media = (media_state.get("media") if isinstance(media_state, dict) else None) or h.media
+        if media == "webpage" and extra:
+            d.insert("end", "\n")
+            if extra.get("site"):
+                d.insert("end", extra["site"].upper() + "\n", "cardsite")
+            if extra.get("title"):
+                d.insert("end", extra["title"] + "\n", "cardtitle")
+            if extra.get("description"):
+                d.insert("end", extra["description"] + "\n", "card")
+            if extra.get("url"):
+                st = d.index("end-1c")
+                d.insert("end", extra["url"] + "\n")
+                self._tag_link(st, d.index("end-2c"), extra["url"])
+        elif media in ("document", "video", "audio", "voice") and extra:
+            bits = [extra.get("file") or extra.get("title")]
+            if extra.get("duration"):
+                bits.append(f"{extra['duration'] // 60}:{extra['duration'] % 60:02d}")
+            if extra.get("size"):
+                bits.append(_human_size(extra["size"]))
+            d.insert("end", "\n" + MEDIA_LABELS.get(media, "") + " " + "  ·  ".join(b for b in bits if b) + "\n", "meta")
+        elif media == "geo" and extra.get("lat") is not None:
+            url = f"https://www.openstreetmap.org/?mlat={extra['lat']}&mlon={extra['lon']}#map=15/{extra['lat']}/{extra['lon']}"
+            st = d.index("end-1c")
+            d.insert("end", "\n📍 Pokaż na mapie\n")
+            self._tag_link(f"{st}+1c", d.index("end-1c"), url)
+
+        # akcje
+        d.insert("end", "\n")
         if h.link:
-            d.insert("end", "↗ Otwórz w Telegramie", "link")
+            self._action(d, "↗ Otwórz podgląd", lambda: self._open_selected_link())
+            tg = telegram_app_link(h.link)
+            if tg:
+                d.insert("end", "     ")
+                self._action(d, "📱 W aplikacji Telegram", lambda: browser.open_url(tg, self.cfg.data_dir))
             uname = _username_from_link(h.link)
             if uname and uname.lower() not in {fold(x).lstrip("@").replace("https://t.me/", "") for x in self.cfg.telegram.watched}:
-                d.insert("end", "      ")
+                d.insert("end", "     ")
                 d.insert("end", f"＋ Obserwuj @{uname}", ("follow",))
                 self._follow_target = uname
         else:
             d.insert("end", "Czat prywatny / mała grupa — Telegram nie daje linków do takich wiadomości.", "meta")
         d.configure(state="disabled")
+
+    def _insert_image(self, path):
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            self.detail.insert("end", "(do podglądu zdjęć uruchom Szperacz.bat — doinstaluje Pillow)\n\n", "meta")
+            return
+        try:
+            img = Image.open(path)
+            w = max(240, self.detail.winfo_width() - 40)
+            img.thumbnail((w, 460))
+            self._detail_img = ImageTk.PhotoImage(img)
+            self.detail.image_create("end", image=self._detail_img)
+            self.detail.insert("end", "\n\n")
+        except Exception as e:  # noqa: BLE001
+            self.detail.insert("end", f"(nie da się wyświetlić zdjęcia: {e})\n\n", "meta")
+
+    def _tag_link(self, a, b, url):
+        n = len(self._detail_links)
+        tag = f"url{n}"
+        self._detail_links[tag] = url
+        self.detail.tag_add("url", a, b)
+        self.detail.tag_add(tag, a, b)
+        self.detail.tag_bind(tag, "<Button-1>", lambda *_: browser.open_url(url, self.cfg.data_dir, self._browser_failed))
+
+    def _action(self, d, text, fn):
+        tag = f"act{len(self._detail_links)}"
+        self._detail_links[tag] = text
+        d.insert("end", text, ("link", tag))
+        d.tag_bind(tag, "<Button-1>", lambda *_: fn())
 
     def follow_channel(self):
         name = getattr(self, "_follow_target", None)
@@ -1065,7 +1380,12 @@ class App:
         if sel:
             h = self.hits[int(sel[0])]
             if h.link:
-                webbrowser.open(h.link)
+                browser.open_url(h.link, self.cfg.data_dir, self._browser_failed)
+
+    def _browser_failed(self, reason):
+        log_line(f"Wbudowana przeglądarka nie wystartowała: {reason}")
+        self.bg.call_ui(lambda: self.count.configure(
+            text="Wbudowana przeglądarka nie wystartowała — otwieram w zwykłej (szczegóły w szperacz.log)"))
 
     # ------------------------------------------------------------- Telegram
     def _connector(self):

@@ -93,13 +93,19 @@ async def cmd_sync(cfg, args) -> int:
 
 def _query_from_args(args) -> Query:
     words = args.slowa or []
+    hf = ht = None
+    if args.godz:
+        a, _, b = args.godz.partition("-")
+        hf, ht = int(a), int(b or a)
     groups = [[w] for w in words]
     return Query(
         keyword_groups=groups if not args.fts else [],
         raw_fts=" ".join(words) if args.fts else None,
         chats=args.czat or [], senders=args.nadawca or [],
         date_from=args.od, date_to=args.do,
-        order="date" if args.najnowsze else "rank", limit=args.n,
+        order="oldest" if args.najstarsze else ("date" if args.najnowsze else "rank"), limit=args.n,
+        hour_from=hf, hour_to=ht, chat_types=args.typ or [], content=args.tresc or [],
+        direction="out" if args.moje else ("in" if args.od_innych else None),
     )
 
 
@@ -214,6 +220,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--do", help="YYYY-MM-DD")
     s.add_argument("--najnowsze", action="store_true", help="sortuj od najnowszych zamiast trafności")
     s.add_argument("--fts", action="store_true", help="surowe zapytanie FTS5 (AND/OR/NOT, NEAR)")
+    s.add_argument("--najstarsze", action="store_true", help="sortuj od najstarszych")
+    s.add_argument("--godz", metavar="OD-DO", help="pora dnia, np. 8-17 albo 22-5")
+    s.add_argument("--typ", action="append", choices=["prywatny", "grupa", "kanał", "bot"],
+                   help="rodzaj czatu (można powtarzać)")
+    s.add_argument("--tresc", action="append",
+                   choices=["text", "photo", "video", "document", "link", "audio", "poll", "geo"],
+                   help="zawartość (można powtarzać)")
+    s.add_argument("--moje", action="store_true", help="tylko moje wiadomości")
+    s.add_argument("--od-innych", action="store_true", help="tylko wiadomości od innych")
     s.add_argument("-n", type=int, default=20)
 
     s = sub.add_parser("pytaj", help="zapytaj po ludzku (Claude)")
