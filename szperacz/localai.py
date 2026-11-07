@@ -9,7 +9,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
+import sys
 import sqlite3
 import threading
 import time
@@ -32,6 +36,23 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 class LocalAiError(RuntimeError):
     pass
+
+
+def find_ollama_exe() -> str | None:
+    """ollama.exe z PATH albo z domyślnego miejsca instalacji w Windows."""
+    exe = shutil.which("ollama")
+    if exe:
+        return exe
+    for base in (os.environ.get("LOCALAPPDATA"), os.environ.get("ProgramFiles")):
+        if base:
+            for p in (Path(base) / "Programs" / "Ollama" / "ollama.exe", Path(base) / "Ollama" / "ollama.exe"):
+                if p.exists():
+                    return str(p)
+    return None
+
+
+def _is_local(url: str) -> bool:
+    return bool(re.match(r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?", url or ""))
 
 
 def _http(url, data=None, timeout=60):
@@ -119,6 +140,46 @@ class LocalAI:
         self.cache = Cache(cache_path)
         self._status = None
         self._caps: dict[str, list] = {}
+        self._start_tried = False
+
+    def _ollama_up(self) -> bool:
+        try:
+            _http(self.cfg.ollama_url + "/api/tags", timeout=3)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def ensure_running(self, wait=20.0, log=None) -> bool:
+        """Jeśli Ollama nie działa, a jest zainstalowana na tym komputerze — uruchamia
+        `ollama serve` w tle (tak jak KRONOS-7) i czeka, aż odpowie."""
+        if self._ollama_up():
+            return True
+        if not _is_local(self.cfg.ollama_url):
+            return False
+        exe = find_ollama_exe()
+        if not exe:
+            return False
+        if log:
+            log("Uruchamiam Ollamę…")
+        kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}
+        if sys.platform.startswith("win"):
+            kw["creationflags"] = 0x08000000 | 0x00000008   # CREATE_NO_WINDOW | DETACHED_PROCESS
+        else:
+            kw["start_new_session"] = True
+        env = dict(os.environ)
+        m = re.match(r"^https?://([^/]+)", self.cfg.ollama_url)
+        if m:
+            env.setdefault("OLLAMA_HOST", m.group(1))
+        try:
+            subprocess.Popen([exe, "serve"], env=env, **kw)
+        except OSError:
+            return False
+        t0 = time.time()
+        while time.time() - t0 < wait:
+            time.sleep(0.5)
+            if self._ollama_up():
+                return True
+        return False
 
     # ---------------------------------------------------------- wykrywanie
     def status(self, refresh=False) -> dict:
@@ -131,6 +192,9 @@ class LocalAI:
             st["error"] = "wyłączone w ustawieniach"
             self._status = st
             return st
+        if not self._start_tried and not self._ollama_up():
+            self._start_tried = True
+            self.ensure_running()
         try:
             tags = _http(self.cfg.ollama_url + "/api/tags", timeout=4)
             st["backend"] = "ollama"
@@ -141,7 +205,8 @@ class LocalAI:
                 st["backend"] = "lmstudio"
                 st["models"] = [m.get("id") for m in r.get("data", [])]
             except Exception:  # noqa: BLE001
-                st["error"] = "nie znaleziono Ollamy ani LM Studio na tym komputerze"
+                st["error"] = ("Ollama nie odpowiada i nie udało się jej uruchomić" if find_ollama_exe()
+                               else "nie znaleziono Ollamy ani LM Studio na tym komputerze")
         if st["backend"]:
             st["text"] = self._pick_text(st["models"])
             st["vision"] = self._pick_vision(st["models"], st["backend"])
@@ -324,6 +389,10 @@ class LocalAI:
 
     def pull(self, model, progress=None) -> None:
         """Pobiera model do Ollamy, progress(tekst) z postępem."""
+        if not self.ensure_running(log=progress):
+            raise LocalAiError("Ollama nie działa. Uruchom ją (menu Start → Ollama albo KRONOS-7) "
+                               "i spróbuj ponownie." if find_ollama_exe() else
+                               "Nie znaleziono Ollamy na tym komputerze — zainstaluj ją z https://ollama.com/download")
         req = urllib.request.Request(self.cfg.ollama_url + "/api/pull",
                                      data=json.dumps({"model": model, "stream": True}).encode(),
                                      headers={"Content-Type": "application/json"})

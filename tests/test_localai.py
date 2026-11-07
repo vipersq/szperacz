@@ -147,3 +147,35 @@ def test_pull_progress(ollama, tmp_path):
 def test_disabled(tmp_path):
     st = LocalAI(LocalAiCfg(enabled=False), tmp_path / "c.sqlite").status()
     assert st["backend"] is None and "wyłączone" in st["error"]
+
+
+def test_auto_starts_ollama_when_not_running(tmp_path, monkeypatch):
+    """Ollama nie działa → Szperacz uruchamia `ollama serve` (tu: udawany serwer) i ją wykrywa."""
+    import socket
+    from szperacz import localai as L
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    started = {}
+
+    def fake_popen(cmd, **kw):
+        started["cmd"] = cmd
+        srv = HTTPServer(("127.0.0.1", port), FakeOllama)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        started["srv"] = srv
+        return object()
+
+    monkeypatch.setattr(L, "find_ollama_exe", lambda: "C:/Ollama/ollama.exe")
+    monkeypatch.setattr(L.subprocess, "Popen", fake_popen)
+    a = ai(f"http://127.0.0.1:{port}", tmp_path)
+    st = a.status()
+    assert started["cmd"] == ["C:/Ollama/ollama.exe", "serve"] and st["backend"] == "ollama"
+    started["srv"].shutdown()
+
+
+def test_pull_without_ollama_installed_gives_clear_error(tmp_path, monkeypatch):
+    from szperacz import localai as L
+    monkeypatch.setattr(L, "find_ollama_exe", lambda: None)
+    with pytest.raises(LocalAiError, match="ollama.com"):
+        ai("http://127.0.0.1:9", tmp_path).pull("qwen3-vl:8b")

@@ -223,6 +223,11 @@ def friendly_error(e: BaseException) -> str:
     if "database is locked" in str(e):
         return ("Sesja Telegrama jest używana przez inny otwarty Szperacz "
                 "(drugie okno, Szperacz.exe albo synchronizacja w konsoli). Zamknij go i spróbuj ponownie.")
+    if "10061" in str(e) or "Connection refused" in str(e) or "actively refused" in str(e):
+        return ("Program nie dostał połączenia (odmowa). Jeśli to lokalne AI: Ollama nie działa — "
+                "uruchom ją (menu Start → Ollama albo przez KRONOS-7) i kliknij wskaźnik AI na dole okna.")
+    if type(e).__name__ == "LocalAiError":
+        return str(e)
     if isinstance(e, (ConnectionError, OSError)):
         return f"Brak połączenia: {e}"
     return f"{name}: {e}"
@@ -1355,7 +1360,7 @@ class App:
             win.finish(f"Pobrano {n}.", ok=True)
             self.check_local_ai()
 
-        self.bg.run(work, done, lambda e: win.finish(friendly_error(e), ok=False))
+        self.bg.run(work, done, lambda e: (win.finish(friendly_error(e), ok=False), self.check_local_ai()))
 
     def _start_ai_review(self):
         st = self.lai_status or {}
