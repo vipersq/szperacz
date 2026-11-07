@@ -1,0 +1,19 @@
+# Twoje dane i klucze — NIGDY do repo
+config.toml
+dane/
+*.session
+*.session-journal
+*.sqlite
+*.sqlite-*
+szperacz.log
+
+# Python / budowanie
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+*.spec
+*.exe
