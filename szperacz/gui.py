@@ -163,6 +163,9 @@ def friendly_error(e: BaseException) -> str:
         return "Nieprawidłowe hasło dwuetapowe (2FA)."
     if name == "ApiIdInvalidError":
         return "Telegram odrzucił api_id / api_hash. Sprawdź je w Ustawieniach."
+    if "database is locked" in str(e):
+        return ("Sesja Telegrama jest używana przez inny otwarty Szperacz "
+                "(drugie okno, Szperacz.exe albo synchronizacja w konsoli). Zamknij go i spróbuj ponownie.")
     if isinstance(e, (ConnectionError, OSError)):
         return f"Brak połączenia: {e}"
     return f"{name}: {e}"
@@ -829,6 +832,7 @@ class App:
 
     def reload_config(self):
         self.cfg = cfgmod.load(str(self.cfg_path))
+        self.bg.run(self.drop_shared)   # nowe api_id/hash → nowe połączenie
         self.refresh_meta()
 
     def clear_filters(self):
@@ -899,14 +903,14 @@ class App:
         if not self._need_telegram():
             return
         use_ai = self.g_ai.get() and bool(self.cfg.ai.api_key)
-        cfg, tg = self.cfg, self._connector()
+        cfg = self.cfg
         opts = dict(posts=self.g_posts.get(), mine=self.g_mine.get(), discover=self.g_disc.get())
 
         async def work():
-            async with tg:
-                return await service.global_search(
-                    cfg, tg, text, use_ai=use_ai, allow_paid_stars=allow_paid_stars,
-                    log=lambda m: self.bg.call_ui(self._progress_note, m), **opts)
+            tg = await self.shared_tg()
+            return await service.global_search(
+                cfg, tg, text, use_ai=use_ai, allow_paid_stars=allow_paid_stars,
+                log=lambda m: self.bg.call_ui(self._progress_note, m), **opts)
 
         self._show_answer()
         self._set_answer([("Szukam w Telegramie…", "muted")])
@@ -941,12 +945,12 @@ class App:
                 self.global_search_paid(text, r.payment_needed)
 
     def global_search_paid(self, text, stars):
-        cfg, tg = self.cfg, self._connector()
+        cfg = self.cfg
 
         async def work():
-            async with tg:
-                return await service.global_search(cfg, tg, text, use_ai=False, allow_paid_stars=stars,
-                                                   posts=True, mine=False, discover=False)
+            tg = await self.shared_tg()
+            return await service.global_search(cfg, tg, text, use_ai=False, allow_paid_stars=stars,
+                                               posts=True, mine=False, discover=False)
 
         def done(r):
             seen = {(h.chat_name, h.text) for h in r.hits}
@@ -1084,6 +1088,7 @@ class App:
         dlg = QrDialog(self)
 
         async def work():
+            await self.drop_shared()
             try:
                 return await tg.qr_login(
                     show_qr=lambda url, exp: self.bg.call_ui(dlg.set_qr, url, exp),
@@ -1141,6 +1146,7 @@ class App:
             return v
 
         async def work():
+            await self.drop_shared()
             try:
                 return await tg.login(
                     phone_cb=ask("Logowanie", "Numer telefonu z kodem kraju, np. +447700900123"),
@@ -1154,8 +1160,31 @@ class App:
         self.bg.run(work, self._logged_in)
 
     async def fetch_chats(self):
-        async with self._connector() as tg:
-            return await tg.list_chats(watched=self.cfg.telegram.watched)
+        tg = await self.shared_tg()
+        return await tg.list_chats(watched=self.cfg.telegram.watched)
+
+    # Jedno wspólne połączenie z Telegramem dla całego okna: plik sesji może być
+    # otwarty tylko raz, a synchronizacja i szukanie mają działać jednocześnie.
+    async def shared_tg(self):
+        import asyncio
+        if getattr(self, "_tg_lock", None) is None:
+            self._tg_lock = asyncio.Lock()
+        async with self._tg_lock:
+            tg = getattr(self, "_shared", None)
+            if tg is None or tg.client is None or not tg.client.is_connected():
+                tg = self._connector()
+                await tg.open()
+                self._shared = tg
+            return tg
+
+    async def drop_shared(self):
+        tg = getattr(self, "_shared", None)
+        self._shared = None
+        if tg is not None:
+            try:
+                await tg.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def open_chats(self):
         if self._need_telegram():
@@ -1168,20 +1197,25 @@ class App:
         cfg = self.cfg
         t = cfg.telegram
         flt = ChatFilter(t.include, t.exclude, t.skip_channels)
+        if getattr(self, "_syncing", False):
+            messagebox.showinfo("Synchronizacja", "Synchronizacja już trwa — poczekaj, aż się skończy.\n"
+                                                  "W tym czasie możesz normalnie szukać.")
+            return
+        self._syncing = True
         win = LogWindow(self, "Synchronizacja")
-        tg = self._connector()
 
         async def work():
             ix = Index(cfg.index_path)
             try:
-                async with tg:
-                    return await sync(tg, ix, flt, first_sync_limit=t.first_sync_limit, only=only,
-                                      log=lambda s: self.bg.call_ui(win.append, s),
-                                      watched=t.watched, watched_limit=t.watched_limit)
+                tg = await self.shared_tg()
+                return await sync(tg, ix, flt, first_sync_limit=t.first_sync_limit, only=only,
+                                  log=lambda s: self.bg.call_ui(win.append, s),
+                                  watched=t.watched, watched_limit=t.watched_limit)
             finally:
                 ix.close()
 
         def done(s):
+            self._syncing = False
             msg = f"Gotowe: {s['new']} nowych wiadomości z {s['chats']} czatów."
             if s["errors"]:
                 msg += f"  Błędy w {len(s['errors'])} czatach."
@@ -1189,6 +1223,7 @@ class App:
             self.refresh_meta()
 
         def err(e):
+            self._syncing = False
             win.finish(friendly_error(e), ok=False)
             self.refresh_meta()
 
@@ -1234,8 +1269,38 @@ def main():
         import os
         os.chdir(Path(sys.executable).parent)
     root = tk.Tk()
+    if not _single_instance():
+        root.withdraw()
+        messagebox.showinfo("Szperacz", "Szperacz jest już otwarty — sprawdź pasek zadań.\n\n"
+                                        "Dwa okna naraz nie mogą korzystać z tej samej sesji Telegrama.")
+        return
     App(root)
     root.mainloop()
+
+
+_LOCK_FILE = None
+
+
+def _single_instance() -> bool:
+    """Blokada pliku dane/.szperacz.lock — drugi egzemplarz okna się nie uruchomi."""
+    global _LOCK_FILE
+    try:
+        cfg = cfgmod.load(str(cfgmod.find_config()) if cfgmod.find_config() else None)
+        cfg.data_dir.mkdir(parents=True, exist_ok=True)
+        f = open(cfg.data_dir / ".szperacz.lock", "a+")
+        if sys.platform.startswith("win"):
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _LOCK_FILE = f
+        return True
+    except OSError:
+        return False
+    except Exception:  # noqa: BLE001 — w razie wątpliwości nie blokujemy startu
+        return True
 
 
 if __name__ == "__main__":

@@ -352,4 +352,8 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(e, (cfgmod.ConfigError, NotLoggedIn, AiUnavailable, LoginNeedsEmail)):
             print(f"Błąd: {e}", file=sys.stderr)
             return 2
+        if "database is locked" in str(e):
+            print("Błąd: sesja Telegrama jest używana przez otwarte okno Szperacza. "
+                  "Zamknij je albo wykonaj to w oknie.", file=sys.stderr)
+            return 3
         raise
