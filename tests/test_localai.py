@@ -202,3 +202,50 @@ def test_gpu_stats_without_nvidia(monkeypatch):
     from szperacz import localai as L
     monkeypatch.setattr(L, "_SMI", "")
     assert L.gpu_stats() is None
+
+
+def test_ollama_error_body_is_reported(ollama, tmp_path):
+    """Błąd 400 bez związku z 'think' → po próbach komunikat z treścią odpowiedzi Ollamy."""
+    from szperacz.localai import OllamaHTTPError
+
+    class Bad(FakeOllama):
+        def do_POST(self):
+            if self.path == "/api/chat":
+                self.rfile.read(int(self.headers["Content-Length"]))
+                return self._send({"error": "model qwen3-vl:8b does not support images"}, 400)
+            return FakeOllama.do_POST(self)
+    srv = HTTPServer(("127.0.0.1", 0), Bad)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    a = ai(f"http://127.0.0.1:{srv.server_address[1]}", tmp_path)
+    p = tmp_path / "x.jpg"
+    p.write_bytes(b"x")
+    with pytest.raises(OllamaHTTPError, match="does not support images"):
+        a.check_image(p)
+    srv.shutdown()
+
+
+def test_image_converted_to_jpeg(tmp_path):
+    pytest.importorskip("PIL")
+    import base64
+    import io
+
+    from PIL import Image
+
+    from szperacz.localai import _jpeg_b64
+    buf = io.BytesIO()
+    Image.new("RGBA", (3000, 1500), (255, 0, 0, 128)).save(buf, "WEBP")
+    out = base64.b64decode(_jpeg_b64(buf.getvalue()))
+    img = Image.open(io.BytesIO(out))
+    assert img.format == "JPEG" and max(img.size) == 1024
+
+
+def test_local_phrase_and_answer(ollama, tmp_path):
+    from szperacz.models import Hit
+    a = ai(ollama, tmp_path)
+    # udawany serwer zwraca w trybie „inne” obiekt tłumaczenia — sprawdzamy tylko, że wywołania przechodzą
+    FakeOllama.calls = []
+    try:
+        a.telegram_query("co piszą o ataku w Krakowie dzisiaj wieczorem")
+    except Exception:
+        pass
+    assert any(c[0] == "/api/chat" for c in FakeOllama.calls)

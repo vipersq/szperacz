@@ -167,23 +167,34 @@ class GlobalOutcome(Result):
 async def global_search(cfg, connector, prompt: str, *, use_ai: bool = False,
                         posts: bool = True, mine: bool = True, discover: bool = True,
                         allow_paid_stars: int | None = None, log=None,
-                        filters: Query | None = None) -> GlobalOutcome:
+                        filters: Query | None = None, local_ai=None) -> GlobalOutcome:
     """Szukanie w całym Telegramie na żywo (publiczne kanały, Twoje czaty, znalezione grupy)."""
     import asyncio
 
     from . import ai
 
     q = prompt.strip()
-    if use_ai and cfg.ai.api_key and not q.startswith("#"):
-        loop = asyncio.get_running_loop()
-        q = await loop.run_in_executor(None, lambda: ai.telegram_query(
-            prompt, api_key=cfg.ai.api_key, model=cfg.ai.parse_model))
+    loop = asyncio.get_running_loop()
+    lai_ok = bool(local_ai is not None and (local_ai.status().get("text")))
+    ai_notes = []
+    if use_ai and not q.startswith("#") and len(q.split()) > 3:   # krótkie zapytania zostawiamy jak są
+        try:
+            if lai_ok:
+                q = await loop.run_in_executor(None, lambda: local_ai.telegram_query(prompt))
+            elif cfg.ai.api_key:
+                q = await loop.run_in_executor(None, lambda: ai.telegram_query(
+                    prompt, api_key=cfg.ai.api_key, model=cfg.ai.parse_model))
+        except Exception as e:  # noqa: BLE001 — AI nie działa: szukamy dokładnie wpisanej frazy
+            import logging
+            logging.getLogger("szperacz").warning("fraza AI: %s", e, exc_info=e)
+            ai_notes.append(f"AI nie dobrało frazy ({type(e).__name__}) — szukam dokładnie wpisanej.")
+            q = prompt.strip()
     r = await connector.global_search(q, posts=posts, mine=mine, discover=discover,
                                       watched=cfg.telegram.watched,
                                       allow_paid_stars=allow_paid_stars, log=log)
     groups = [[w] for w in q.lstrip("#").split()]
     msgs = r.messages
-    notes = list(r.notes)
+    notes = ai_notes + list(r.notes)
     if filters is not None and filters.has_filters():
         before = len(msgs)
         msgs = [m for m in msgs if message_matches(m, filters)]
@@ -194,9 +205,16 @@ async def global_search(cfg, connector, prompt: str, *, use_ai: bool = False,
     hits = _to_hits(msgs, groups)
     out = GlobalOutcome(query=Query(keyword_groups=groups), hits=hits, notes=notes,
                         tg_query=q, payment_needed=r.payment_needed, discovered=r.discovered)
-    if use_ai and cfg.ai.api_key and hits:
-        loop = asyncio.get_running_loop()
-        out.answer = await loop.run_in_executor(None, lambda: ai.answer(
-            prompt, hits[:cfg.ai.max_results_for_answer], api_key=cfg.ai.api_key,
-            model=cfg.ai.answer_model))
+    if use_ai and hits and (lai_ok or cfg.ai.api_key):
+        try:
+            if lai_ok:
+                out.answer = await loop.run_in_executor(None, lambda: local_ai.answer(prompt, hits))
+            else:
+                out.answer = await loop.run_in_executor(None, lambda: ai.answer(
+                    prompt, hits[:cfg.ai.max_results_for_answer], api_key=cfg.ai.api_key,
+                    model=cfg.ai.answer_model))
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger("szperacz").warning("streszczenie AI: %s", e, exc_info=e)
+            out.notes.append(f"AI nie streściło wyników ({type(e).__name__}).")
     return out

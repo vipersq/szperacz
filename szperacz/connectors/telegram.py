@@ -5,11 +5,51 @@ Plik sesji (*.session) to klucz do konta — trzymaj go u siebie, nie udostępni
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import AsyncIterator
 
 from ..models import ChatInfo, Message
 from .base import Connector
+
+
+LOG = logging.getLogger("szperacz.telegram")
+
+TG_ERRORS = {
+    "PREMIUM_ACCOUNT_REQUIRED": "wymaga Telegram Premium",
+    "CHANNEL_PRIVATE": "kanał prywatny albo zostałeś z niego usunięty",
+    "CHAT_ADMIN_REQUIRED": "przeszukiwanie wymaga uprawnień administratora",
+    "CHAT_FORBIDDEN": "brak dostępu do tej grupy",
+    "CHANNEL_INVALID": "kanał nie istnieje albo jest niedostępny",
+    "USER_BANNED_IN_CHANNEL": "masz blokadę w tym kanale",
+    "FROZEN_METHOD_INVALID": "Telegram zamroził tę funkcję na Twoim koncie (sprawdź @SpamBot w Telegramie)",
+    "SEARCH_QUERY_EMPTY": "puste zapytanie",
+    "QUERY_TOO_SHORT": "za krótkie zapytanie",
+    "INPUT_TEXT_TOO_LONG": "za długie zapytanie",
+    "PEER_ID_INVALID": "nieznany czat",
+}
+
+
+def describe_tg_error(e) -> str:
+    """Krótki polski opis błędu Telegrama (zamiast samego „Forbidden”)."""
+    name = type(e).__name__
+    msg = getattr(e, "message", None) or ""
+    if name == "FloodWaitError":
+        return f"limit Telegrama — odczekaj {getattr(e, 'seconds', 0)} s"
+    for code, pl in TG_ERRORS.items():
+        if code in msg or code.replace("_", "").lower() in name.lower():
+            return pl
+    code = getattr(e, "code", None)
+    if code == 403 or name == "ForbiddenError":
+        return f"Telegram odmówił dostępu ({msg or name})"
+    if code == 420:
+        return f"Telegram ograniczył tę funkcję na Twoim koncie ({msg or name})"
+    return msg or name
+
+
+def _note(res, where: str, e) -> None:
+    LOG.warning("%s: %s", where, describe_tg_error(e), exc_info=e)
+    res.notes.append(f"{where}: {describe_tg_error(e)}.")
 
 
 class NotLoggedIn(RuntimeError):
@@ -398,7 +438,7 @@ class TelegramConnector(Connector):
                     name = utils.get_display_name(chat) if chat else "?"
                     add(_convert(m, str(m.chat_id), name, None, chat), "Twój czat")
             except Exception as e:  # noqa: BLE001
-                res.notes.append(f"Twoje czaty: błąd ({type(e).__name__}).")
+                _note(res, "Twoje czaty", e)
 
         # 3) publiczne kanały/grupy znalezione po nazwie + obserwowane
         targets = []
@@ -415,7 +455,7 @@ class TelegramConnector(Connector):
                             "grupa" if getattr(ch, "megagroup", False) else "kanał", raw=ch))
                 targets = targets[:max_discovered]
             except Exception as e:  # noqa: BLE001
-                res.notes.append(f"Wyszukiwanie kanałów: błąd ({type(e).__name__}).")
+                _note(res, "Wyszukiwanie kanałów", e)
         for ref in watched or []:
             try:
                 targets.append((await self.resolve_public(ref), "obserwowany"))
@@ -430,7 +470,7 @@ class TelegramConnector(Connector):
                 async for m in self.client.iter_messages(ent, search=terms, limit=per_chat):
                     add(_convert(m, str(utils.get_peer_id(ent)), name, ctype, ent), origin)
             except Exception as e:  # noqa: BLE001
-                res.notes.append(f"{name}: nie da się przeszukać ({type(e).__name__}).")
+                _note(res, f"{name}: nie da się przeszukać", e)
 
         res.messages.sort(key=lambda m: m.date, reverse=True)
         return res
@@ -449,6 +489,7 @@ class TelegramConnector(Connector):
                     res.notes.append(_flood_note(fl))
                     return
             except Exception as e:  # noqa: BLE001
+                LOG.warning("checkSearchPostsFlood: %s", describe_tg_error(e), exc_info=e)
                 if _err(e) == "PREMIUM_ACCOUNT_REQUIRED":
                     res.notes.append("Globalne wyszukiwanie postów wymaga Telegram Premium "
                                      "(wyszukiwanie #hashtagów działa bez limitu).")
@@ -466,7 +507,7 @@ class TelegramConnector(Connector):
                 res.notes.append("Globalne wyszukiwanie postów wymaga Telegram Premium "
                                  "(wyszukiwanie #hashtagów działa bez limitu).")
             else:
-                res.notes.append(f"Wyszukiwanie postów: błąd ({code or type(e).__name__}).")
+                _note(res, "Wszystkie publiczne kanały", e)
             return
         if getattr(r, "search_flood", None):
             res.flood = r.search_flood

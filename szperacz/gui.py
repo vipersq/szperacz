@@ -226,7 +226,7 @@ def friendly_error(e: BaseException) -> str:
     if "10061" in str(e) or "Connection refused" in str(e) or "actively refused" in str(e):
         return ("Program nie dostał połączenia (odmowa). Jeśli to lokalne AI: Ollama nie działa — "
                 "uruchom ją (menu Start → Ollama albo przez KRONOS-7) i kliknij wskaźnik AI na dole okna.")
-    if type(e).__name__ == "LocalAiError":
+    if type(e).__name__ in ("LocalAiError", "OllamaHTTPError"):
         return str(e)
     if isinstance(e, (ConnectionError, OSError)):
         return f"Brak połączenia: {e}"
@@ -885,8 +885,9 @@ class App:
         self.vpane.pack(fill="both", expand=True, padx=18, pady=(8, 0))
 
         self.answer_frame = ttk.Frame(self.vpane, style="Panel.TFrame", padding=(14, 10))
-        ttk.Label(self.answer_frame, text="✦ ODPOWIEDŹ CLAUDE", style="Section.TLabel",
-                  background=PANEL).pack(anchor="w")
+        self.answer_title = ttk.Label(self.answer_frame, text="✦ ODPOWIEDŹ AI", style="Section.TLabel",
+                                      background=PANEL)
+        self.answer_title.pack(anchor="w")
         self.answer = tk.Text(self.answer_frame, height=7, wrap="word", bg=PANEL, fg=FG, relief="flat",
                               font=self._font_big, padx=2, pady=6, cursor="arrow",
                               highlightthickness=0, borderwidth=0)
@@ -1172,7 +1173,7 @@ class App:
     def global_search(self, text, allow_paid_stars=None, filters=None):
         if not self._need_telegram():
             return
-        use_ai = self.g_ai.get() and bool(self.cfg.ai.api_key)
+        use_ai = self.g_ai.get() and (bool((self.lai_status or {}).get("text")) or bool(self.cfg.ai.api_key))
         cfg = self.cfg
         opts = dict(posts=self.g_posts.get(), mine=self.g_mine.get(), discover=self.g_disc.get())
 
@@ -1180,7 +1181,8 @@ class App:
             tg = await self.shared_tg()
             return await service.global_search(
                 cfg, tg, text, use_ai=use_ai, allow_paid_stars=allow_paid_stars,
-                log=lambda m: self.bg.call_ui(self._progress_note, m), filters=filters, **opts)
+                log=lambda m: self.bg.call_ui(self._progress_note, m), filters=filters,
+                local_ai=self.lai, **opts)
 
         self._show_answer()
         self._set_answer([("Szukam w Telegramie…", "muted")])
@@ -2024,6 +2026,9 @@ def main():
     if getattr(sys, "frozen", False):
         import os
         os.chdir(Path(sys.executable).parent)
+    import logging
+    logging.basicConfig(filename="szperacz.log", level=logging.WARNING, encoding="utf-8",
+                        format="=== %(asctime)s === %(name)s %(levelname)s %(message)s")
     root = tk.Tk()
     if not _single_instance():
         root.withdraw()

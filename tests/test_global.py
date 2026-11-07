@@ -155,3 +155,11 @@ def test_add_watched(tmp_path):
     assert cfgmod.add_watched(p, "@bbcnews")
     assert not cfgmod.add_watched(p, "https://t.me/bbcnews")
     assert cfgmod.load(str(p)).telegram.watched == ["@bbcnews"]
+
+
+def test_polish_error_descriptions():
+    from telethon.errors import RPCError
+    from szperacz.connectors.telegram import describe_tg_error
+    assert "Premium" in describe_tg_error(RPCError(None, "PREMIUM_ACCOUNT_REQUIRED", 403))
+    assert "zamroził" in describe_tg_error(RPCError(None, "FROZEN_METHOD_INVALID", 420))
+    assert "odmówił dostępu" in describe_tg_error(RPCError(None, "SOMETHING_NEW", 403))
